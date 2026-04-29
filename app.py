@@ -1168,9 +1168,22 @@ class QFADashboardFinTECH:
             sizing_mode="stretch_width",
         )
 
+        # Persistent KPI pane. We update this object explicitly whenever a selector
+        # changes. This avoids stale KPI cards on Render/Bokeh websocket sessions.
+        self.kpi_pane = pn.pane.HTML(
+            "<h3>Loading Executive KPI Dashboard...</h3>",
+            sizing_mode="stretch_width",
+        )
+
         self.asset_class.param.watch(self._on_asset_class_change, "value")
         self.region.param.watch(self._on_region_change, "value")
+        self.ticker.param.watch(self._on_input_change, "value")
+        self.benchmark.param.watch(self._on_input_change, "value")
+        self.start_date.param.watch(self._on_input_change, "value")
+        self.end_date.param.watch(self._on_input_change, "value")
         self.generate_report_button.on_click(self._on_generate_report_click)
+
+        self._refresh_kpi()
 
     def _on_asset_class_change(self, event):
         regions = get_regions(event.new)
@@ -1180,11 +1193,35 @@ class QFADashboardFinTECH:
         tickers = get_tickers(event.new, self.region.value)
         self.ticker.options = tickers
         self.ticker.value = tickers[0]
+        self._refresh_kpi()
 
     def _on_region_change(self, event):
         tickers = get_tickers(self.asset_class.value, event.new)
         self.ticker.options = tickers
         self.ticker.value = tickers[0]
+        self._refresh_kpi()
+
+    def _on_input_change(self, event):
+        self._refresh_kpi()
+
+    def _refresh_kpi(self):
+        try:
+            pane = self.render_kpi(
+                self.ticker.value,
+                self.asset_class.value,
+                self.region.value,
+                self.benchmark.value,
+                self.start_date.value,
+                self.end_date.value,
+            )
+            self.kpi_pane.object = pane.object
+        except Exception as exc:
+            self.kpi_pane.object = f"""
+            <div style='padding:16px;border:1px solid #b91c1c;border-radius:12px;background:#fff5f5;'>
+                <h3 style='margin-top:0;color:#991b1b;'>KPI refresh failed</h3>
+                <pre style='white-space:pre-wrap;'>{str(exc)}</pre>
+            </div>
+            """
 
     @staticmethod
     def _dates(start_date, end_date):
@@ -1409,15 +1446,7 @@ class QFADashboardFinTECH:
         tabs = pn.Tabs(
             (
                 "Executive KPI Dashboard",
-                pn.bind(
-                    self.render_kpi,
-                    self.ticker,
-                    self.asset_class,
-                    self.region,
-                    self.benchmark,
-                    self.start_date,
-                    self.end_date,
-                ),
+                self.kpi_pane,
             ),
             (
                 "Price & TA-Lib Technicals",

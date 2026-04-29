@@ -40,3 +40,7 @@ panel serve app.py --show --allow-websocket-origin=localhost:5006
 ## Render deployment
 
 Upload this folder or push it to GitHub, then create a Render Web Service using the included `render.yaml`.
+
+
+## KPI reactive fix
+This version uses a persistent `self.kpi_pane` plus explicit watchers on Instrument, Asset Class, Region, Benchmark, Start Date, and End Date. The KPI layout is refreshed immediately when the Instrument selector changes.
