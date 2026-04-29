@@ -1,44 +1,42 @@
-# QFA Dashboard FinTECH — Render Deployment
+# QFA Dashboard FinTECH — Render WebSocket Fixed
 
-Render-ready Panel application with:
+This package is configured for a live Panel/Bokeh deployment on Render.
 
-- Yahoo Finance original matched data only
-- no synthetic price fallback
-- selected benchmark-driven QuantStats Tearsheet
-- fixed risk-free rate: 4.50%
-- TA-Lib if available on the Render image
-- PyPortfolioOpt optimizer tab: Max Sharpe, Minimum Volatility, HRP
-- S&P 500 benchmark mapped to `^GSPC`; SPY is never forced as benchmark
+## Critical Render fix
 
-## Files
+The application must be served as a live Panel server app, not as static HTML.
 
-```text
-app.py
-requirements.txt
-render.yaml
-README.md
+`render.yaml` uses:
+
+```bash
+panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
+```
+
+This is required because Panel widgets update charts through Bokeh WebSocket callbacks. If the WebSocket origin is wrong, the page loads but dropdowns do not trigger Python recomputation.
+
+## Data policy
+
+- Yahoo Finance original market data only.
+- No synthetic fallback prices.
+- Missing/unmatched tickers are excluded or shown as unavailable.
+- TA-Lib is used if available. If not available, only technical indicator formulas fall back; price data never falls back.
+- Risk-free rate is fixed at 4.5%.
+- S&P 500 benchmark uses `^GSPC`, not SPY.
+
+## Included files
+
+- `app.py` — Panel application
+- `requirements.txt` — Python dependencies
+- `render.yaml` — Render deployment config with WebSocket origin fix
+- `README.md` — deployment notes
+
+## Local run
+
+```bash
+pip install -r requirements.txt
+panel serve app.py --show --allow-websocket-origin=localhost:5006
 ```
 
 ## Render deployment
 
-1. Upload/push these files to GitHub.
-2. In Render, create a **New Web Service** from the repo.
-3. Render can detect `render.yaml`, or use manually:
-
-```bash
-pip install --upgrade pip && pip install -r requirements.txt
-```
-
-Start command:
-
-```bash
-panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=* --num-procs 1
-```
-
-## Important implementation notes
-
-QuantStats Tearsheet is generated inside the Render app, saved under `QFA_Dashboard_FinTECH_reports`, then read back and displayed in the Tearsheet tab.
-
-PyPortfolioOpt uses only matched Yahoo close prices from the selected universe. If a ticker has missing or non-overlapping Yahoo data, it is excluded rather than forward-filled or synthetically generated.
-
-TA-Lib is imported if Render successfully installs it. If TA-Lib is unavailable, the app continues with formula-based technical indicators only. Price data is never replaced or synthesized.
+Upload this folder or push it to GitHub, then create a Render Web Service using the included `render.yaml`.
