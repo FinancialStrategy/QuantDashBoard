@@ -1,0 +1,6 @@
+panel
+plotly
+yfinance
+pandas
+numpy
+param
