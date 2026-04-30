@@ -1,25 +1,22 @@
 services:
   - type: web
-    name: qfa-prime-finance-platform
+    name: qfa-hedge-fund-dashboard
     env: python
     plan: free
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-    startCommand: panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=* --num-procs 1 --index app
-    healthCheckPath: /app
+    buildCommand: pip install -r requirements.txt
+    startCommand: panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=* --num-procs 1 --unused-session-lifetime 30000 --check-unused-sessions 30000
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: MPLBACKEND
-        value: Agg
       - key: MPLCONFIGDIR
-        value: /tmp/matplotlib
-      - key: QFA_MAX_TICKERS
+        value: "/tmp/matplotlib"
+      - key: PANEL_LOG_LEVEL
+        value: "warning"
+      - key: QFA_MAX_RENDER_TICKERS
         value: "10"
-      - key: QFA_MC_SIMULATIONS
-        value: "1000"
-      - key: QFA_ENABLE_ROLLING_MC
-        value: "0"
-      - key: QFA_ADVANCED_RISK_WINDOW
-        value: "126"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_MAX_THREADS
+        value: "1"
