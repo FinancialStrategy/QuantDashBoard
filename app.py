@@ -29,8 +29,11 @@ from plotly.subplots import make_subplots
 # Matplotlib / QuantStats font hygiene for Render Linux
 import matplotlib
 matplotlib.use("Agg")
+import logging
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 import matplotlib.pyplot as plt
 plt.rcParams["font.family"] = "DejaVu Sans"
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Liberation Sans"]
 
 try:
     import quantstats as qs
@@ -78,7 +81,7 @@ MIN_OBS = 90
 CACHE_TTL_SECONDS = 900
 
 # No Arial. Keep a cross-platform stack.
-FONT_STACK = "Inter, DejaVu Sans, Segoe UI, Helvetica, Arial, sans-serif"
+FONT_STACK = "DejaVu Sans, Liberation Sans, Segoe UI, Helvetica, sans-serif"
 
 
 # -----------------------------------------------------------------------------
@@ -649,7 +652,7 @@ def chart_layout(fig, title, height=720):
         template="plotly_white",
         height=height,
         margin=dict(l=46, r=28, t=78, b=48),
-        font=dict(family="DejaVu Sans, Segoe UI, Helvetica, sans-serif", size=12, color="#1e293b"),
+        font=dict(family="DejaVu Sans, Liberation Sans, Segoe UI, Helvetica, sans-serif", size=12, color="#1e293b"),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
         hovermode="x unified",
@@ -958,13 +961,15 @@ def build_tearsheet(ticker, benchmark_label, start, end):
 
         header = f"""
         <div class="qfa-note">
-        <b>Tearsheet generated dynamically.</b><br>
+        <b>Tearsheet generated dynamically on demand.</b><br>
         Instrument: <b>{ticker}</b> | Benchmark: <b>{benchmark_label}</b> ({bench}) |
         RF: <b>{RISK_FREE_RATE:.2%}</b> | Matched observations: <b>{len(matched)}</b><br>
         S&P 500 benchmark uses <b>^GSPC</b>; SPY is not hard-coded as benchmark.
         </div>
         """
 
+        # Render free tier can be memory-sensitive. QuantStats HTML is embedded only after
+        # the Tearsheet tab is opened because Tabs are dynamic=True.
         return pn.Column(
             pn.pane.HTML(header, sizing_mode="stretch_width"),
             pn.pane.HTML(html, height=1050, sizing_mode="stretch_width"),
@@ -1125,8 +1130,8 @@ def make_app():
             sizing_mode="stretch_width",
         ),
         width=340,
-        height=980,
-        sizing_mode="fixed",
+        min_height=760,
+        sizing_mode="stretch_height",
         styles={
             "background": "#f8fafc",
             "padding": "20px",
@@ -1167,7 +1172,7 @@ def make_app():
         ("Portfolio Optimizer", bound_optimizer),
         ("Stress Testing", bound_stress),
         ("Tearsheet", bound_tearsheet),
-        dynamic=False,
+        dynamic=True,
         sizing_mode="stretch_width",
     )
 

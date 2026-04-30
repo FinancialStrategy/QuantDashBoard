@@ -45,3 +45,12 @@ panel serve app.py --show
 ## Notes
 
 Render free tier may sleep. First load and QuantStats generation can be slower.
+
+
+## V2 stability changes
+
+- Tabs now use `dynamic=True` to prevent QuantStats and optimizer from rendering at initial page load.
+- Matplotlib font-manager warnings are suppressed.
+- Arial was removed from the Python/Plotly font stack; DejaVu/Liberation Sans are used on Linux.
+- Sidebar sizing was changed to avoid Panel `FIXED_SIZING_MODE` warnings.
+- If Render shows `SIGTERM`, it usually means the service was restarted or memory was exceeded during heavy initial rendering; this V2 build avoids eager rendering.
