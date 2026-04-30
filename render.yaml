@@ -1,22 +1,14 @@
 services:
   - type: web
-    name: qfa-hedge-fund-dashboard
+    name: qfa-v13-institutional-terminal
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=* --num-procs 1 --unused-session-lifetime 30000 --check-unused-sessions 30000
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: MPLCONFIGDIR
-        value: "/tmp/matplotlib"
-      - key: PANEL_LOG_LEVEL
-        value: "warning"
-      - key: QFA_MAX_RENDER_TICKERS
-        value: "10"
-      - key: OPENBLAS_NUM_THREADS
-        value: "1"
-      - key: OMP_NUM_THREADS
-        value: "1"
-      - key: NUMEXPR_MAX_THREADS
-        value: "1"
+      - key: QFA_MAX_TICKERS
+        value: "18"
+      - key: QFA_CACHE_TTL
+        value: "900"

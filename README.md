@@ -1,39 +1,52 @@
-# QFA Prime Finance Platform V7
+# QFA V13 Institutional Terminal
 
-Render-ready institutional hedge fund dashboard.
+Render-ready FastAPI + Plotly institutional quant dashboard.
 
-## V7 Additions
+## Fixed policy
 
-- TA-Lib PRO Signals tab
-  - ADX, CCI, Williams %R, OBV, Momentum, ATR, EWMA Risk Signal.
-  - Uses TA-Lib when available; otherwise formula calculations are computed from original Yahoo OHLCV data.
-- Professional RiskMetrics tab
-  - VaR 95/99, CVaR 95/99, skewness, kurtosis, Calmar, Omega, Ulcer Index, hit ratio, tracking error, information ratio.
-- Advanced Risk Analytics
-  - Historical / parametric / Monte Carlo VaR-CVaR snapshot, rolling VaR, VaR/NAV, rolling beta, violation backtest, historical drawdown regimes.
-- Risk Contribution tab
-  - Portfolio risk contribution by strategy using the covariance matrix of matched Yahoo returns.
-- Multi-strategy optimizer
-  - Max Sharpe, Min Volatility, Max Diversification, Efficient Risk 15% Vol, HRP-style, Equal Weight.
-- Advanced Stress Testing
-  - Crisis, inflation, banking stress, selloff, rally scenario families with severity filters and KPI cards.
+- Benchmark: `^GSPC`
+- Risk-free rate: `4.5%`
+- Data source: Yahoo Finance daily data only
+- No fallback benchmark
+- No synthetic data
+- No Panel / No Bokeh
 
-## Data Policy
+## Features
 
-No synthetic price data, no substitute price series, no fallback asset prices. All market calculations use original Yahoo Finance OHLCV / close data only. If Yahoo returns no usable data, the app shows a clear warning and does not fabricate data.
+- PyPortfolioOpt strategy engine
+- Max Sharpe, Minimum Volatility, Efficient Risk, Equal Weight, Inverse Volatility
+- Equal Risk Contribution, Maximum Diversification, HRP, Black-Litterman, Tracking Error Optimal
+- User-selected best strategy rule
+- Institutional KPI layout
+- VaR / CVaR at 95% and 99%
+- Historical, Parametric Normal, Monte Carlo with at least 10,000 simulations
+- 3-month VaR / NAV historical series
+- Rolling Beta vs ^GSPC
+- Rolling Sharpe and rolling volatility
+- Advanced stress testing with scenario family filters and severity ranking
+- QuantStats-style metrics table
+- PCA factor diagnostics
+- Data QA tables
 
-## Render
-
-Build command:
-
-```bash
-pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-```
+## Render deploy
 
 Start command:
 
 ```bash
-panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
+uvicorn app:app --host 0.0.0.0 --port $PORT
 ```
 
-TA-Lib remains optional because Render free Linux builds often fail without the native C library. V7 still gives institutional technical indicators through formula calculations from real Yahoo OHLCV data when TA-Lib is not installed.
+Do not use `panel serve`.
+
+## Local run
+
+```bash
+pip install -r requirements.txt
+uvicorn app:app --reload
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
