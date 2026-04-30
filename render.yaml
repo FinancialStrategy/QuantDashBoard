@@ -1,10 +1,11 @@
 services:
   - type: web
-    name: qfa-prime-finance-platform-v7
+    name: qfa-prime-finance-platform
     env: python
     plan: free
     buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-    startCommand: panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
+    startCommand: panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=* --num-procs 1 --index app
+    healthCheckPath: /app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -14,11 +15,11 @@ services:
         value: Agg
       - key: MPLCONFIGDIR
         value: /tmp/matplotlib
-      - key: QFA_CACHE_TTL_SECONDS
-        value: "900"
       - key: QFA_MAX_TICKERS
-        value: "12"
+        value: "10"
       - key: QFA_MC_SIMULATIONS
-        value: "2500"
+        value: "1000"
       - key: QFA_ENABLE_ROLLING_MC
         value: "0"
+      - key: QFA_ADVANCED_RISK_WINDOW
+        value: "126"
