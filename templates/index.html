@@ -1,1 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QFA V13 Institutional Terminal</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-kicker">MK FinTECH LabGEN@2026</div>
+        <h1>QFA V13 Institutional Terminal</h1>
+        <p>FastAPI + Plotly terminal. Benchmark locked to ^GSPC. RF locked to 4.5%. Yahoo-only. No fallback. No synthetic data.</p>
+      </div>
 
+      <section class="side-card">
+        <h3>Data Policy</h3>
+        <div class="policy-line"><span>Benchmark</span><b>^GSPC</b></div>
+        <div class="policy-line"><span>Risk-Free Rate</span><b>4.5%</b></div>
+        <div class="policy-line"><span>Fallback</span><b class="danger">Disabled</b></div>
+        <div class="policy-line"><span>Synthetic Data</span><b class="danger">Forbidden</b></div>
+      </section>
+
+      <section class="side-card">
+        <h3>Core Controls</h3>
+        <label>Start Date</label>
+        <input type="date" id="startDate" value="2019-01-01" />
+        <label>Initial Capital</label>
+        <input type="number" id="initialCapital" value="10000000" step="100000" />
+        <label>Expected Return Method</label>
+        <select id="expectedReturnMethod">
+          <option value="ema_historical">EMA Historical</option>
+          <option value="historical_mean">Historical Mean</option>
+          <option value="capm">CAPM vs ^GSPC</option>
+        </select>
+        <label>Covariance Method</label>
+        <select id="covarianceMethod">
+          <option value="ledoit_wolf">Ledoit-Wolf</option>
+          <option value="shrinkage">Shrinkage 20%</option>
+          <option value="sample">Sample Covariance</option>
+        </select>
+        <label>Best Strategy Rule</label>
+        <select id="bestStrategyRule">
+          <option value="balanced_score">Balanced Institutional Score</option>
+          <option value="max_sharpe">Max Sharpe</option>
+          <option value="max_sortino">Max Sortino</option>
+          <option value="max_calmar">Max Calmar</option>
+          <option value="max_information_ratio">Max Information Ratio</option>
+          <option value="min_vol">Minimum Volatility</option>
+          <option value="min_drawdown">Minimum Drawdown</option>
+          <option value="lowest_tracking_error">Lowest Tracking Error</option>
+          <option value="max_return">Max Return</option>
+        </select>
+        <div class="grid-two">
+          <div><label>Max Weight</label><input type="number" id="maxWeight" value="0.20" step="0.01" /></div>
+          <div><label>Max Category</label><input type="number" id="maxCategory" value="0.45" step="0.01" /></div>
+        </div>
+        <div class="grid-two">
+          <div><label>TE Target</label><input type="number" id="teTarget" value="0.06" step="0.005" /></div>
+          <div><label>Rolling Window</label><input type="number" id="rollingWindow" value="63" step="1" /></div>
+        </div>
+        <label>Monte Carlo Simulations</label>
+        <input type="number" id="mcSimulations" value="10000" min="10000" max="50000" step="1000" />
+      </section>
+
+      <section class="side-card">
+        <h3>Stress Filters</h3>
+        <label>Family</label>
+        <select id="stressFamily">
+          <option value="All">All</option>
+          <option value="crisis">Crisis</option>
+          <option value="inflation">Inflation</option>
+          <option value="banking stress">Banking Stress</option>
+          <option value="sharp rally">Sharp Rally</option>
+          <option value="sharp selloff">Sharp Selloff</option>
+        </select>
+        <label>Minimum Severity</label>
+        <input type="number" id="minSeverity" value="0" step="0.1" />
+      </section>
+
+      <section class="side-card">
+        <h3>Investment Universe</h3>
+        <div id="universeBox" class="universe-box"></div>
+      </section>
+
+      <button id="runBtn" class="primary-btn">Run Institutional Analysis</button>
+      <div id="statusBox" class="status">Ready.</div>
+    </aside>
+
+    <main class="main">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Render-ready institutional terminal</div>
+          <h2>QFA V13 Institutional Terminal</h2>
+          <p id="metaLine">Benchmark: ^GSPC • RF: 4.5% • Yahoo Finance daily data only</p>
+        </div>
+      </header>
+
+      <section id="kpiGrid" class="kpi-grid"></section>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="key">Key Metrics</button>
+        <button class="tab" data-tab="strategy">Strategy Decision</button>
+        <button class="tab" data-tab="optimization">Optimization</button>
+        <button class="tab" data-tab="risk">Risk Metrics</button>
+        <button class="tab" data-tab="var">VaR / CVaR</button>
+        <button class="tab" data-tab="rolling">Rolling Analytics</button>
+        <button class="tab" data-tab="stress">Advanced Stress</button>
+        <button class="tab" data-tab="factor">Factor PCA</button>
+        <button class="tab" data-tab="data">Data QA</button>
+      </nav>
+
+      <section id="tab-key" class="panel active-panel">
+        <div class="card"><div class="card-title">Performance & Risk Metrics Smart Table</div><div id="performanceTable"></div></div>
+        <div class="card"><div class="card-title">Portfolio vs Benchmark Equity Curve</div><div id="equityChart" class="chart"></div></div>
+        <div class="card"><div class="card-title">Drawdown Analysis</div><div id="drawdownChart" class="chart"></div></div>
+      </section>
+
+      <section id="tab-strategy" class="panel">
+        <div class="card"><div class="card-title">Best Strategy Decision Framework</div><div id="decisionBox" class="callout"></div></div>
+        <div class="card"><div class="card-title">Strategy Comparison Smart Table</div><div id="strategyTable"></div></div>
+        <div class="card"><div class="card-title">Failed / Infeasible Strategy Diagnostics</div><div id="failedTable"></div></div>
+      </section>
+
+      <section id="tab-optimization" class="panel">
+        <div class="card"><div class="card-title">Selected Strategy Allocation</div><div id="allocationChart" class="chart small"></div></div>
+        <div class="card"><div class="card-title">Strategy Risk / Return Map</div><div id="strategyScatter" class="chart"></div></div>
+        <div class="card"><div class="card-title">Risk Contributions</div><div id="riskContributionChart" class="chart small"></div><div id="riskContributionTable"></div></div>
+      </section>
+
+      <section id="tab-risk" class="panel">
+        <div class="card"><div class="card-title">QuantStats-Style Metrics</div><div id="quantstatsTable"></div></div>
+        <div class="card"><div class="card-title">Daily Returns Distribution</div><div id="returnsHistogram" class="chart small"></div></div>
+      </section>
+
+      <section id="tab-var" class="panel">
+        <div class="card"><div class="card-title">VaR / CVaR Smart Table — Historical, Parametric, Monte Carlo</div><div id="varTable"></div></div>
+        <div class="card"><div class="card-title">3-Month VaR / NAV Historical Series</div><div id="varNavChart" class="chart"></div></div>
+      </section>
+
+      <section id="tab-rolling" class="panel">
+        <div class="grid-2">
+          <div class="card"><div class="card-title">Rolling Beta vs ^GSPC</div><div id="rollingBetaChart" class="chart small"></div></div>
+          <div class="card"><div class="card-title">Rolling Sharpe</div><div id="rollingSharpeChart" class="chart small"></div></div>
+        </div>
+        <div class="card"><div class="card-title">Rolling Volatility</div><div id="rollingVolChart" class="chart small"></div></div>
+      </section>
+
+      <section id="tab-stress" class="panel">
+        <div id="stressKpis" class="kpi-grid compact"></div>
+        <div class="card"><div class="card-title">Advanced Stress Testing Scenario Ranking</div><div id="stressChart" class="chart small"></div></div>
+        <div class="card"><div class="card-title">Stress Testing Smart Table</div><div id="stressTable"></div></div>
+      </section>
+
+      <section id="tab-factor" class="panel">
+        <div class="grid-2">
+          <div class="card"><div class="card-title">PCA Explained Variance</div><div id="pcaVarianceChart" class="chart small"></div></div>
+          <div class="card"><div class="card-title">PC1 Loadings</div><div id="pcaLoadingsChart" class="chart small"></div></div>
+        </div>
+        <div class="card"><div class="card-title">PCA Loadings Table</div><div id="pcaTable"></div></div>
+      </section>
+
+      <section id="tab-data" class="panel">
+        <div class="card"><div class="card-title">Instrument Metadata</div><div id="metadataTable"></div></div>
+        <div class="card"><div class="card-title">Data Quality Diagnostics</div><div id="dataQualityTable"></div></div>
+        <div class="card"><div class="card-title">Prices Preview</div><div id="pricesTable"></div></div>
+        <div class="card"><div class="card-title">Returns Preview</div><div id="returnsTable"></div></div>
+      </section>
+
+      <footer>Institutional Quantitative Platform — MK Istanbul Fintech LabGEN @2026</footer>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
