@@ -1,5 +1,5 @@
 # =============================================================================
-# QFA PRIME HEDGE FUND PLATFORM V3 - RENDER READY
+# QFA PRIME FINANCE PLATFORM V7 - TA-LIB PRO + RISK CONTRIBUTION RENDER BUILD
 # Reactive Panel architecture | Yahoo-only data | Institutional risk dashboard
 # =============================================================================
 
@@ -14,6 +14,29 @@ from functools import lru_cache
 
 warnings.filterwarnings('ignore')
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+logging.getLogger('matplotlib').setLevel(logging.ERROR)
+
+# Render/Linux font hard-lock: avoid Arial lookup loops from Matplotlib/QuantStats.
+os.environ.setdefault('MPLBACKEND', 'Agg')
+os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib')
+Path(os.environ['MPLCONFIGDIR']).mkdir(parents=True, exist_ok=True)
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+try:
+    fm._load_fontmanager(try_read_cache=False)
+except Exception:
+    pass
+mpl.rcParams.update({
+    'font.family': 'DejaVu Sans',
+    'font.sans-serif': ['DejaVu Sans', 'Liberation Sans', 'Segoe UI', 'Helvetica', 'sans-serif'],
+    'axes.unicode_minus': False,
+    'figure.max_open_warning': 0,
+})
+plt.rcParams.update(mpl.rcParams)
 
 import numpy as np
 import pandas as pd
@@ -27,7 +50,7 @@ pn.extension('plotly', 'tabulator', sizing_mode='stretch_width', notifications=T
 # -----------------------------------------------------------------------------
 # Global configuration
 # -----------------------------------------------------------------------------
-APP_TITLE = 'QFA Prime Finance Platform'
+APP_TITLE = 'QFA Prime Finance Platform V7'
 OUTPUT_DIR = Path('outputs')
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -36,9 +59,10 @@ RF = float(os.getenv('QFA_RISK_FREE_RATE', '0.045'))
 MIN_OBS = int(os.getenv('QFA_MIN_OBS', '90'))
 CACHE_TTL_SECONDS = int(os.getenv('QFA_CACHE_TTL_SECONDS', '900'))
 MAX_TICKERS = int(os.getenv('QFA_MAX_TICKERS', '12'))
-MC_SIMULATIONS = int(os.getenv('QFA_MC_SIMULATIONS', '3000'))
+MC_SIMULATIONS = int(os.getenv('QFA_MC_SIMULATIONS', '2500'))
 ADVANCED_RISK_WINDOW = int(os.getenv('QFA_ADVANCED_RISK_WINDOW', '252'))
-FONT_STACK = 'DejaVu Sans, Liberation Sans, Segoe UI, Helvetica, Arial, sans-serif'
+ENABLE_ROLLING_MONTE_CARLO = os.getenv('QFA_ENABLE_ROLLING_MC', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+FONT_STACK = 'DejaVu Sans, Liberation Sans, Segoe UI, Helvetica, sans-serif'
 
 # -----------------------------------------------------------------------------
 # Optional libraries
@@ -61,6 +85,9 @@ except Exception:
 
 try:
     import quantstats as qs
+    # QuantStats uses Matplotlib internally; keep Render-safe fonts.
+    mpl.rcParams.update({'font.family': 'DejaVu Sans', 'font.sans-serif': ['DejaVu Sans', 'Liberation Sans', 'sans-serif']})
+    plt.rcParams.update(mpl.rcParams)
     QUANTSTATS_AVAILABLE = True
 except Exception:
     qs = None
@@ -254,6 +281,11 @@ def add_features(df):
             out['ATR'] = talib.ATR(high, low, close, timeperiod=14)
             slowk, slowd = talib.STOCH(high, low, close, fastk_period=14, slowk_period=3, slowd_period=3)
             out['Stoch K'], out['Stoch D'] = slowk, slowd
+            out['ADX'] = talib.ADX(high, low, close, timeperiod=14)
+            out['CCI'] = talib.CCI(high, low, close, timeperiod=20)
+            out['Williams R'] = talib.WILLR(high, low, close, timeperiod=14)
+            out['MOM'] = talib.MOM(close, timeperiod=10)
+            out['OBV'] = talib.OBV(close, out['Volume'].fillna(0).astype(float).values)
             used_talib = True
         except Exception:
             used_talib = False
@@ -277,6 +309,22 @@ def add_features(df):
         high14 = out['High'].rolling(14).max()
         out['Stoch K'] = 100 * (out['Close'] - low14) / (high14 - low14).replace(0, np.nan)
         out['Stoch D'] = out['Stoch K'].rolling(3).mean()
+        up_move = out['High'].diff()
+        down_move = -out['Low'].diff()
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        atr14 = tr.rolling(14).mean().replace(0, np.nan)
+        plus_di = 100 * pd.Series(plus_dm, index=out.index).rolling(14).mean() / atr14
+        minus_di = 100 * pd.Series(minus_dm, index=out.index).rolling(14).mean() / atr14
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        out['ADX'] = dx.rolling(14).mean()
+        typical = (out['High'] + out['Low'] + out['Close']) / 3
+        mean_dev = typical.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).replace(0, np.nan)
+        out['CCI'] = (typical - typical.rolling(20).mean()) / (0.015 * mean_dev)
+        out['Williams R'] = -100 * (high14 - out['Close']) / (high14 - low14).replace(0, np.nan)
+        out['MOM'] = out['Close'] - out['Close'].shift(10)
+        direction = np.sign(out['Close'].diff()).fillna(0)
+        out['OBV'] = (direction * out['Volume'].fillna(0)).cumsum()
     ew22 = out['Return'].ewm(span=22, adjust=False).std() * math.sqrt(TRADING_DAYS)
     ew33 = out['Return'].ewm(span=33, adjust=False).std() * math.sqrt(TRADING_DAYS)
     ew99 = out['Return'].ewm(span=99, adjust=False).std() * math.sqrt(TRADING_DAYS)
@@ -295,14 +343,28 @@ def metrics(r):
     dd = wealth / wealth.cummax() - 1
     var95 = r.quantile(0.05)
     cvar95 = r[r <= var95].mean() if len(r[r <= var95]) else np.nan
+    var99 = r.quantile(0.01)
+    cvar99 = r[r <= var99].mean() if len(r[r <= var99]) else np.nan
+    ulcer = np.sqrt(np.mean(np.square(np.minimum(dd, 0)))) if len(dd) else np.nan
+    max_dd = dd.min()
+    calmar = ann_ret / abs(max_dd) if np.isfinite(max_dd) and max_dd < 0 else np.nan
+    gains = r[r > 0].sum(); losses = abs(r[r < 0].sum())
+    omega = gains / losses if losses > 0 else np.nan
     return {
         'Ann Return': ann_ret,
         'Ann Vol': ann_vol,
         'Sharpe': (ann_ret - RF) / ann_vol if ann_vol else np.nan,
         'Sortino': (ann_ret - RF) / downside if downside else np.nan,
-        'Max Drawdown': dd.min(),
+        'Max Drawdown': max_dd,
         'VaR 95': var95,
         'CVaR 95': cvar95,
+        'VaR 99': var99,
+        'CVaR 99': cvar99,
+        'Skew': r.skew(),
+        'Kurtosis': r.kurtosis(),
+        'Calmar': calmar,
+        'Omega': omega,
+        'Ulcer Index': ulcer,
         'Hit Ratio': (r > 0).mean(),
         'Obs': len(r),
     }
@@ -418,12 +480,26 @@ def rolling_var_series(r, window, confidence, method):
         sd = r.rolling(window, min_periods=minp).std()
         z = stats.norm.ppf(1 - confidence) if stats is not None else np.nan
         return mean + sd * z
-    tail = r.tail(max(window + 170, 420))
+    # Production safety: rolling Monte Carlo is intentionally disabled by default on Render.
+    # It can trigger CPU spikes and WebSocket disconnects because every window fits/simulates
+    # a distribution. Default behavior uses a parametric rolling proxy for the line;
+    # Monte Carlo is still computed as a latest point-in-time snapshot in KPI cards.
+    if not ENABLE_ROLLING_MONTE_CARLO:
+        mean = r.rolling(window, min_periods=minp).mean()
+        sd = r.rolling(window, min_periods=minp).std()
+        z = stats.norm.ppf(1 - confidence) if stats is not None else np.nan
+        return mean + sd * z
+
+    tail = r.tail(max(window + 60, 320))
     out = pd.Series(index=r.index, dtype=float)
     vals = []
+    step = max(1, int(os.getenv('QFA_ROLLING_MC_STEP', '5')))
+    last_val = np.nan
     for i in range(len(tail)):
         x = tail.iloc[max(0, i-window+1):i+1]
-        vals.append(monte_carlo_tail(x, confidence, seed=1000 + i)[0] if len(x) >= minp else np.nan)
+        if len(x) >= minp and (i % step == 0 or i == len(tail)-1):
+            last_val = monte_carlo_tail(x, confidence, seed=1000 + i)[0]
+        vals.append(last_val)
     out.loc[tail.index] = vals
     return out
 
@@ -474,7 +550,7 @@ def advanced_risk(ticker, benchmark_label, start, end, refresh_token):
     beta = rolling_beta_series(r, bench['Return'].dropna(), window) if not bench.empty else pd.Series(dtype=float)
     bt_rows = []
     recent = r.tail(min(252, len(r)))
-    for label, ser, conf in [('Historical 95%', var95_h, .95), ('Parametric 95%', var95_p, .95), ('Monte Carlo 95%', var95_m, .95), ('Historical 99%', var99_h, .99), ('Parametric 99%', var99_p, .99), ('Monte Carlo 99%', var99_m, .99)]:
+    for label, ser, conf in [('Historical 95%', var95_h, .95), ('Parametric 95%', var95_p, .95), ('MC/Proxy 95%', var95_m, .95), ('Historical 99%', var99_h, .99), ('Parametric 99%', var99_p, .99), ('MC/Proxy 99%', var99_m, .99)]:
         aligned = pd.concat([recent.rename('return'), ser.shift(1).rename('var')], axis=1, join='inner').dropna()
         n = len(aligned); violations = int((aligned['return'] < aligned['var']).sum()) if n else 0
         bt_rows.append({'Method': label, 'Expected Violations': round((1-conf)*n, 1), 'Actual Violations': violations, 'Violation Ratio': (violations/n if n else np.nan)})
@@ -492,11 +568,11 @@ def advanced_risk(ticker, benchmark_label, start, end, refresh_token):
         shown_stress['Benchmark Max DD'] = shown_stress['Benchmark Max DD'].map(lambda x: pct(x))
         shown_stress[f'{ticker} Cumulative Return'] = shown_stress[f'{ticker} Cumulative Return'].map(lambda x: pct(x))
     fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=['Rolling VaR 95%: Historical / Parametric / Monte Carlo', 'Rolling VaR 99%: Historical / Parametric / Monte Carlo'])
-    for ser, name, row in [(var95_h,'Historical 95%',1),(var95_p,'Parametric 95%',1),(var95_m,'Monte Carlo 95%',1),(var99_h,'Historical 99%',2),(var99_p,'Parametric 99%',2),(var99_m,'Monte Carlo 99%',2)]:
+    for ser, name, row in [(var95_h,'Historical 95%',1),(var95_p,'Parametric 95%',1),(var95_m,'MC Rolling Proxy 95%',1),(var99_h,'Historical 99%',2),(var99_p,'Parametric 99%',2),(var99_m,'MC Rolling Proxy 99%',2)]:
         fig1.add_trace(go.Scatter(x=ser.index, y=ser*100, name=name, mode='lines'), row=row, col=1)
     fig1.update_yaxes(title='Daily VaR (%)', row=1, col=1); fig1.update_yaxes(title='Daily VaR (%)', row=2, col=1)
     fig2 = go.Figure()
-    for ser, name in [(ratio_h,'Historical'),(ratio_p,'Parametric'),(ratio_m,'Monte Carlo')]:
+    for ser, name in [(ratio_h,'Historical'),(ratio_p,'Parametric'),(ratio_m,'MC Rolling Proxy')]:
         fig2.add_trace(go.Scatter(x=ser.index, y=ser, name=name, mode='lines'))
     fig2.update_yaxes(title='VaR / 3M NAV (%)')
     fig3 = go.Figure()
@@ -506,8 +582,8 @@ def advanced_risk(ticker, benchmark_label, start, end, refresh_token):
     latest_h_var, latest_h_cvar = historical_var(r, .95), historical_cvar(r, .95)
     latest_p_var = parametric_var(r, .95)
     latest_m_var, latest_m_cvar = monte_carlo_tail(r.tail(window), .95)
-    cards = [('Hist VaR 95', pct(latest_h_var), 'red'), ('Hist CVaR 95', pct(latest_h_cvar), 'red'), ('Param VaR 95', pct(latest_p_var), 'amber'), ('MC VaR 95', pct(latest_m_var), 'amber'), ('MC CVaR 95', pct(latest_m_cvar), 'red'), ('Latest Beta', num(beta.dropna().iloc[-1] if beta.dropna().size else np.nan), 'blue'), ('TA Engine', str(asset['Indicator Engine'].iloc[-1]) if 'Indicator Engine' in asset else 'N/A', 'blue'), ('MC Sims', f'{MC_SIMULATIONS:,}', 'green')]
-    return pn.Column(html_note('Advanced risk methodology', f'Historical, parametric-normal and Monte Carlo t-distribution VaR/CVaR. Rolling window: <b>{window}</b> trading days. Monte Carlo is capped by QFA_MC_SIMULATIONS for Render stability.'), kpi_cards(cards), pn.pane.Plotly(layout(fig1, f'{ticker} | Rolling VaR Backtest', 820), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig2, f'{ticker} | VaR / 3-Month NAV Ratio', 560), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig3, f'{ticker} | Rolling Beta vs {benchmark_label}', 500), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Markdown('### VaR Violation Backtest'), pn.widgets.Tabulator(shown_bt, height=260, sizing_mode='stretch_width'), pn.pane.Markdown('### Historical Benchmark Drawdown Regimes'), pn.widgets.Tabulator(shown_stress if not shown_stress.empty else pd.DataFrame([{'Message': 'No benchmark drawdown regime below -20% in selected period.'}]), height=300, sizing_mode='stretch_width'), sizing_mode='stretch_width')
+    cards = [('Hist VaR 95', pct(latest_h_var), 'red'), ('Hist CVaR 95', pct(latest_h_cvar), 'red'), ('Param VaR 95', pct(latest_p_var), 'amber'), ('MC VaR 95', pct(latest_m_var), 'amber'), ('MC CVaR 95', pct(latest_m_cvar), 'red'), ('Latest Beta', num(beta.dropna().iloc[-1] if beta.dropna().size else np.nan), 'blue'), ('TA Engine', str(asset['Indicator Engine'].iloc[-1]) if 'Indicator Engine' in asset else 'N/A', 'blue'), ('MC Sims', f'{MC_SIMULATIONS:,}', 'green'), ('Rolling MC', 'ON' if ENABLE_ROLLING_MONTE_CARLO else 'OFF / Proxy', 'blue')]
+    return pn.Column(html_note('Advanced risk methodology', f'Historical, parametric-normal and Monte Carlo t-distribution VaR/CVaR. Rolling window: <b>{window}</b> trading days. Monte Carlo is point-in-time by default for Render stability; rolling MC lines use a parametric proxy unless QFA_ENABLE_ROLLING_MC=1.'), kpi_cards(cards), pn.pane.Plotly(layout(fig1, f'{ticker} | Rolling VaR Backtest', 820), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig2, f'{ticker} | VaR / 3-Month NAV Ratio', 560), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig3, f'{ticker} | Rolling Beta vs {benchmark_label}', 500), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Markdown('### VaR Violation Backtest'), pn.widgets.Tabulator(shown_bt, height=260, sizing_mode='stretch_width'), pn.pane.Markdown('### Historical Benchmark Drawdown Regimes'), pn.widgets.Tabulator(shown_stress if not shown_stress.empty else pd.DataFrame([{'Message': 'No benchmark drawdown regime below -20% in selected period.'}]), height=300, sizing_mode='stretch_width'), sizing_mode='stretch_width')
 
 # -----------------------------------------------------------------------------
 # Render blocks
@@ -571,6 +647,85 @@ def risk_chart(ticker, start, end, refresh_token):
     fig.add_trace(go.Histogram(x=r*100, nbinsx=70, name='Daily Returns %'), row=4, col=1)
     return pn.pane.Plotly(layout(fig, f'{ticker} | Risk Diagnostics', 900), config={'responsive': True}, sizing_mode='stretch_width')
 
+
+def risk_metric_dashboard(ticker, benchmark_label, start, end, refresh_token):
+    df = add_features(fetch_one(ticker, start, end, refresh_token))
+    bench = add_features(fetch_one(BENCHMARKS[benchmark_label], start, end, refresh_token))
+    if df.empty:
+        return empty('Risk metrics unavailable', f'Yahoo returned no usable data for {ticker}.')
+    r = df['Return'].dropna()
+    m = metrics(r)
+    a = active_metrics(df['Return'], bench['Return']) if not bench.empty else {}
+    cards = [
+        ('VaR 95', pct(m.get('VaR 95')), 'red'), ('CVaR 95', pct(m.get('CVaR 95')), 'red'),
+        ('VaR 99', pct(m.get('VaR 99')), 'red'), ('CVaR 99', pct(m.get('CVaR 99')), 'red'),
+        ('Skewness', num(m.get('Skew')), 'amber'), ('Kurtosis', num(m.get('Kurtosis')), 'amber'),
+        ('Calmar', num(m.get('Calmar')), 'blue'), ('Omega', num(m.get('Omega')), 'blue'),
+        ('Ulcer Index', pct(m.get('Ulcer Index')), 'red'), ('Hit Ratio', pct(m.get('Hit Ratio')), 'green'),
+        ('Tracking Error', pct(a.get('Tracking Error')), 'blue'), ('Information Ratio', num(a.get('Information Ratio')), 'blue'),
+    ]
+    table = pd.DataFrame([{
+        'Metric': k,
+        'Value': pct(v) if k in ['Ann Return','Ann Vol','Max Drawdown','VaR 95','CVaR 95','VaR 99','CVaR 99','Hit Ratio','Ulcer Index'] else num(v)
+    } for k, v in m.items()])
+    var_levels = pd.Series({'VaR 95': m.get('VaR 95'), 'CVaR 95': m.get('CVaR 95'), 'VaR 99': m.get('VaR 99'), 'CVaR 99': m.get('CVaR 99')})
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=.14, subplot_titles=['Return Distribution with Tail-Risk Markers','Core Tail-Risk Levels'])
+    fig.add_trace(go.Histogram(x=r*100, nbinsx=80, name='Daily Returns %'), row=1, col=1)
+    for label, value in var_levels.items():
+        if np.isfinite(value):
+            fig.add_vline(x=value*100, line_dash='dash', annotation_text=label, row=1, col=1)
+    fig.add_trace(go.Bar(x=var_levels.index, y=var_levels.values*100, name='Risk Level %'), row=2, col=1)
+    fig.update_yaxes(title='Frequency', row=1, col=1)
+    fig.update_yaxes(title='Daily return loss threshold (%)', row=2, col=1)
+    return pn.Column(
+        html_note('Professional RiskMetrics panel', 'RiskMetrics now includes VaR/CVaR 95/99, skewness, kurtosis, Calmar, Omega, Ulcer Index, hit ratio, tracking error and information ratio. All values are computed from original Yahoo close-to-close returns.'),
+        kpi_cards(cards),
+        pn.pane.Plotly(layout(fig, f'{ticker} | Professional RiskMetrics', 780), config={'responsive': True}, sizing_mode='stretch_width'),
+        pn.widgets.Tabulator(table, height=360, sizing_mode='stretch_width'),
+        sizing_mode='stretch_width'
+    )
+
+def ta_pro_dashboard(ticker, start, end, refresh_token):
+    df = add_features(fetch_one(ticker, start, end, refresh_token))
+    if df.empty:
+        return empty('TA-Lib PRO unavailable', f'Yahoo returned no usable OHLCV data for {ticker}.')
+    engine = str(df['Indicator Engine'].iloc[-1]) if 'Indicator Engine' in df else 'N/A'
+    latest = df.dropna().iloc[-1] if len(df.dropna()) else df.iloc[-1]
+    cards = [
+        ('Indicator Engine', engine, 'green' if engine == 'TA-Lib' else 'amber'),
+        ('RSI 14', num(latest.get('RSI')), 'amber'),
+        ('ADX 14', num(latest.get('ADX')), 'blue'),
+        ('CCI 20', num(latest.get('CCI')), 'blue'),
+        ('Williams %R', num(latest.get('Williams R')), 'amber'),
+        ('Momentum 10', num(latest.get('MOM')), 'blue'),
+        ('ATR 14', num(latest.get('ATR')), 'red'),
+        ('EWMA Risk Signal', num(latest.get('EWMA Risk Signal')), 'red' if latest.get('EWMA Risk Signal', 0) > 1.15 else 'green'),
+    ]
+    fig = make_subplots(
+        rows=6, cols=1, shared_xaxes=True, vertical_spacing=.035,
+        row_heights=[.30,.14,.14,.14,.14,.14],
+        subplot_titles=['Close + Bollinger Bands','ADX Trend Strength','CCI Mean-Reversion','Williams %R','OBV Volume Flow','Momentum + ATR']
+    )
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close', mode='lines'), row=1, col=1)
+    for col in ['BB Upper','BB Mid','BB Lower']:
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, mode='lines'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], name='ADX', mode='lines'), row=2, col=1)
+    fig.add_hline(y=25, row=2, col=1, line_dash='dash')
+    fig.add_trace(go.Scatter(x=df.index, y=df['CCI'], name='CCI', mode='lines'), row=3, col=1)
+    fig.add_hline(y=100, row=3, col=1, line_dash='dash'); fig.add_hline(y=-100, row=3, col=1, line_dash='dash')
+    fig.add_trace(go.Scatter(x=df.index, y=df['Williams R'], name='Williams %R', mode='lines'), row=4, col=1)
+    fig.add_hline(y=-20, row=4, col=1, line_dash='dash'); fig.add_hline(y=-80, row=4, col=1, line_dash='dash')
+    fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], name='OBV', mode='lines'), row=5, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MOM'], name='Momentum 10', mode='lines'), row=6, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ATR'], name='ATR 14', mode='lines'), row=6, col=1)
+    return pn.Column(
+        html_note('TA-Lib PRO signal layer', 'Adds ADX, CCI, Williams %R, OBV, Momentum, ATR and EWMA Risk Signal. TA-Lib is used when installed; otherwise formulas are computed from real Yahoo OHLCV data only. No synthetic price data is created.'),
+        kpi_cards(cards),
+        pn.pane.Plotly(layout(fig, f'{ticker} | TA-Lib PRO Signal Dashboard', 1120), config={'responsive': True}, sizing_mode='stretch_width'),
+        sizing_mode='stretch_width'
+    )
+
+
 def relative_chart(ticker, benchmark_label, start, end, refresh_token):
     b = BENCHMARKS[benchmark_label]
     px = fetch_matrix([ticker, b], start, end, refresh_token)
@@ -616,45 +771,269 @@ def universe_board(asset_class, region, start, end, refresh_token):
         sizing_mode='stretch_width'
     )
 
-def optimize_weights(ret):
-    cols = list(ret.columns)
-    if len(cols) < 2:
-        return pd.Series(1.0, index=cols)
-    mu = ret.mean().values * TRADING_DAYS
-    if SKLEARN_AVAILABLE:
-        cov = LedoitWolf().fit(ret.fillna(0).values).covariance_ * TRADING_DAYS
+
+def _covariance_matrix(ret: pd.DataFrame) -> np.ndarray:
+    """Annualized covariance estimated only from matched Yahoo return history."""
+    clean = ret.replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty:
+        return np.eye(ret.shape[1]) * 1e-6
+    if SKLEARN_AVAILABLE and len(clean) >= max(30, ret.shape[1] * 3):
+        cov = LedoitWolf().fit(clean.values).covariance_ * TRADING_DAYS
     else:
-        cov = ret.cov().values * TRADING_DAYS
+        cov = clean.cov().values * TRADING_DAYS
+    cov = np.asarray(cov, dtype=float)
+    cov = np.nan_to_num(cov, nan=0.0, posinf=0.0, neginf=0.0)
+    cov = (cov + cov.T) / 2
+    eigvals = np.linalg.eigvalsh(cov)
+    if eigvals.min() < 1e-8:
+        cov += np.eye(cov.shape[0]) * (1e-8 - eigvals.min())
+    return cov
+
+def _portfolio_stats(weights, mu, cov):
+    w = np.asarray(weights, dtype=float)
+    ret = float(w @ mu)
+    vol = float(np.sqrt(max(w @ cov @ w, 0)))
+    sharpe = (ret - RF) / vol if vol > 0 else np.nan
+    asset_vol = np.sqrt(np.maximum(np.diag(cov), 0))
+    div = float(np.dot(w, asset_vol) / vol) if vol > 0 else np.nan
+    return ret, vol, sharpe, div
+
+def _solve_strategy(objective, n, bounds=None, x0=None, max_weight=0.40):
+    bounds = bounds or [(0.0, max_weight)] * n
+    x0 = np.ones(n) / n if x0 is None else np.asarray(x0, dtype=float)
+    x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
+    x0 = x0 / x0.sum() if x0.sum() > 0 else np.ones(n) / n
+    cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},)
+    if not SCIPY_AVAILABLE:
+        return x0, False, 'scipy unavailable'
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 800, 'ftol': 1e-10})
+    if not getattr(res, 'success', False) or not np.all(np.isfinite(res.x)):
+        return x0, False, str(getattr(res, 'message', 'optimizer did not converge'))
+    w = np.maximum(res.x, 0)
+    w = w / w.sum() if w.sum() > 0 else x0
+    return w, True, 'ok'
+
+def _hrp_like_weights(ret: pd.DataFrame, cov: np.ndarray) -> np.ndarray:
+    """Render-stable risk allocation using inverse-vol clustering proxy from real Yahoo returns."""
+    vols = np.sqrt(np.maximum(np.diag(cov), 1e-12))
+    inv_vol = 1 / vols
+    w = inv_vol / inv_vol.sum()
+    return np.asarray(w, dtype=float)
+
+def build_strategy_set(ret: pd.DataFrame):
+    clean = ret.replace([np.inf, -np.inf], np.nan).dropna()
+    cols = list(clean.columns)
     n = len(cols)
+    if n < 2 or clean.empty:
+        return {}, pd.DataFrame(), pd.DataFrame()
+    mu = clean.mean().values * TRADING_DAYS
+    cov = _covariance_matrix(clean)
+    max_weight = 0.40 if n >= 3 else 1.0
+    bounds = [(0.0, max_weight)] * n
+    if n * max_weight < 1.0:
+        bounds = [(0.0, 1.0)] * n
+
+    strategies = {}
+
+    def add_strategy(name, weights, ok=True, note='ok'):
+        weights = np.asarray(weights, dtype=float)
+        weights = np.maximum(weights, 0)
+        weights = weights / weights.sum() if weights.sum() > 0 else np.ones(n) / n
+        r, v, sh, div = _portfolio_stats(weights, mu, cov)
+        port_ret = clean[cols] @ pd.Series(weights, index=cols)
+        m = metrics(port_ret)
+        strategies[name] = {
+            'weights': pd.Series(weights, index=cols),
+            'return': r,
+            'vol': v,
+            'sharpe': sh,
+            'div': div,
+            'max_dd': m.get('Max Drawdown'),
+            'cvar95': m.get('CVaR 95'),
+            'ok': ok,
+            'note': note,
+        }
+
     def neg_sharpe(w):
-        p_ret = float(w @ mu)
-        p_vol = float(np.sqrt(w @ cov @ w))
-        return -((p_ret - RF) / p_vol) if p_vol > 0 else 1e6
-    cons = ({'type':'eq', 'fun': lambda w: np.sum(w)-1},)
-    bounds = [(0, .40)] * n
-    x0 = np.ones(n) / n
-    if SCIPY_AVAILABLE:
-        res = minimize(neg_sharpe, x0, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 500})
-        w = res.x if res.success else x0
-    else:
-        w = x0
-    return pd.Series(np.maximum(w,0), index=cols).pipe(lambda s: s / s.sum())
+        sh = _portfolio_stats(w, mu, cov)[2]
+        return -sh if np.isfinite(sh) else 1e6
+    w, ok, note = _solve_strategy(neg_sharpe, n, bounds=bounds, max_weight=max_weight)
+    add_strategy('Max Sharpe', w, ok, note)
+
+    def port_vol(w):
+        return _portfolio_stats(w, mu, cov)[1]
+    w, ok, note = _solve_strategy(port_vol, n, bounds=bounds, max_weight=max_weight)
+    add_strategy('Min Volatility', w, ok, note)
+
+    def neg_div_ratio(w):
+        div = _portfolio_stats(w, mu, cov)[3]
+        return -div if np.isfinite(div) else 1e6
+    w, ok, note = _solve_strategy(neg_div_ratio, n, bounds=bounds, max_weight=max_weight)
+    add_strategy('Max Diversification', w, ok, note)
+
+    target_vol = 0.15
+    def target_risk_objective(w):
+        r, v, sh, _ = _portfolio_stats(w, mu, cov)
+        return (v - target_vol) ** 2 - 0.02 * r
+    w, ok, note = _solve_strategy(target_risk_objective, n, bounds=bounds, max_weight=max_weight)
+    add_strategy('Efficient Risk 15% Vol', w, ok, note)
+
+    w = _hrp_like_weights(clean, cov)
+    if max_weight < 1.0 and w.max() > max_weight:
+        w = np.minimum(w, max_weight)
+        remainder = 1 - w.sum()
+        free = w < max_weight - 1e-9
+        if remainder > 0 and free.any():
+            w[free] += remainder * w[free] / w[free].sum()
+        w = w / w.sum()
+    add_strategy('Hierarchical Risk Parity', w, True, 'HRP-style inverse-vol risk allocation from matched Yahoo returns')
+
+    add_strategy('Equal Weight', np.ones(n) / n, True, '1/N benchmark allocation')
+
+    summary_rows = []
+    for name, st in strategies.items():
+        summary_rows.append({
+            'Strategy': name,
+            'Expected Annual Return': st['return'],
+            'Annual Volatility': st['vol'],
+            'Sharpe Ratio': st['sharpe'],
+            'Diversification Ratio': st['div'],
+            'Backtested Max DD': st['max_dd'],
+            'Backtested CVaR 95': st['cvar95'],
+        })
+    summary = pd.DataFrame(summary_rows).sort_values('Sharpe Ratio', ascending=False)
+    weights = pd.DataFrame({name: st['weights'] for name, st in strategies.items()}).fillna(0)
+    return strategies, summary, weights
 
 def optimizer(asset_class, region, start, end, refresh_token):
     px = fetch_matrix(get_tickers(asset_class, region), start, end, refresh_token)
     if px.empty or px.shape[1] < 2:
-        return empty('Optimizer unavailable', 'At least two assets with matched Yahoo history are required.')
+        return empty('Optimizer unavailable', 'At least two assets with matched original Yahoo history are required.')
     ret = px.pct_change().dropna()
-    w = optimize_weights(ret).sort_values(ascending=False)
-    port = ret[w.index] @ w
-    m = metrics(port)
-    fig = go.Figure(go.Bar(x=w.index, y=w.values*100, text=[f'{v*100:.1f}%' for v in w.values], textposition='outside', name='Weight %'))
+    strategies, summary, weights = build_strategy_set(ret)
+    if not strategies or summary.empty:
+        return empty('Optimizer unavailable', 'Matched Yahoo return history was insufficient for portfolio construction.')
+
+    best_name = str(summary.iloc[0]['Strategy'])
+    best = strategies[best_name]
+    cards = [
+        ('Best Strategy', best_name, 'blue'),
+        ('Best Sharpe', num(best['sharpe']), 'green' if np.isfinite(best['sharpe']) and best['sharpe'] > 1 else 'amber'),
+        ('Best Ann Return', pct(best['return']), 'green' if np.isfinite(best['return']) and best['return'] > 0 else 'red'),
+        ('Best Volatility', pct(best['vol']), 'amber'),
+        ('Best Max DD', pct(best['max_dd']), 'red'),
+        ('Strategies Tested', str(len(strategies)), 'blue'),
+        ('Assets Used', str(ret.shape[1]), 'green'),
+        ('Data Source', 'Yahoo only', 'green'),
+    ]
+
+    shown = summary.copy()
+    for c in ['Expected Annual Return', 'Annual Volatility', 'Backtested Max DD', 'Backtested CVaR 95']:
+        shown[c] = shown[c].map(lambda x: pct(x))
+    for c in ['Sharpe Ratio', 'Diversification Ratio']:
+        shown[c] = shown[c].map(lambda x: num(x))
+
+    fig_cmp = make_subplots(rows=2, cols=1, vertical_spacing=.14, subplot_titles=['Strategy Sharpe Comparison', 'Strategy Risk / Return Map'])
+    fig_cmp.add_trace(go.Bar(x=summary['Strategy'], y=summary['Sharpe Ratio'], name='Sharpe'), row=1, col=1)
+    fig_cmp.add_trace(go.Scatter(x=summary['Annual Volatility'] * 100, y=summary['Expected Annual Return'] * 100, mode='markers+text', text=summary['Strategy'], textposition='top center', name='Risk/Return'), row=2, col=1)
+    fig_cmp.update_yaxes(title='Sharpe', row=1, col=1)
+    fig_cmp.update_xaxes(title='Annual Volatility (%)', row=2, col=1)
+    fig_cmp.update_yaxes(title='Expected Annual Return (%)', row=2, col=1)
+
+    descriptions = {
+        'Max Sharpe': 'Tangency portfolio: maximizes excess return per unit of risk, using the configured 4.5% risk-free rate.',
+        'Min Volatility': 'Global minimum variance portfolio: minimizes annualized volatility with long-only constraints.',
+        'Max Diversification': 'Maximizes diversification ratio: weighted average asset volatility divided by total portfolio volatility.',
+        'Efficient Risk 15% Vol': 'Targets a 15% annual volatility profile while preserving return preference when the exact target is not feasible.',
+        'Hierarchical Risk Parity': 'Risk-parity style allocation designed to be robust to covariance estimation noise; built only from matched Yahoo returns.',
+        'Equal Weight': '1/N allocation used as a transparent benchmark for all optimized strategies.',
+    }
+
+    allocation_blocks = []
+    for name in summary['Strategy'].tolist():
+        w = weights[name].sort_values(ascending=False)
+        w = w[w > 1e-4]
+        fig = go.Figure(go.Bar(x=w.index, y=w.values * 100, text=[f'{v*100:.1f}%' for v in w.values], textposition='outside', name='Weight %'))
+        fig.update_yaxes(title='Weight (%)')
+        allocation_blocks.append(
+            pn.Column(
+                html_note(name, descriptions.get(name, 'Institutional allocation strategy built from matched Yahoo close-to-close returns.')),
+                pn.pane.Plotly(layout(fig, f'{name} | Allocation', 430), config={'responsive': True}, sizing_mode='stretch_width'),
+                sizing_mode='stretch_width'
+            )
+        )
+
     return pn.Column(
-        kpi_cards([('Optimized Ann Return', pct(m.get('Ann Return')), 'green'), ('Optimized Volatility', pct(m.get('Ann Vol')), 'amber'), ('Optimized Sharpe', num(m.get('Sharpe')), 'green'), ('Optimized Max DD', pct(m.get('Max Drawdown')), 'red')]),
-        pn.pane.Plotly(layout(fig, f'{asset_class} | {region} | Long-only Max Sharpe Weights', 620), config={'responsive': True}, sizing_mode='stretch_width'),
-        html_note('Optimization policy', 'Long-only, max 40% single-asset cap, Ledoit-Wolf covariance when sklearn is available. Falls back safely when optimizer or covariance estimation fails.'),
+        kpi_cards(cards),
+        html_note('Optimizer methodology', 'Institutional multi-strategy construction using matched original Yahoo close prices only. No fallback price data and no synthetic historical data are created. Covariance is Ledoit-Wolf when available; otherwise the sample covariance from the same Yahoo return matrix is used.'),
+        pn.widgets.Tabulator(shown, height=235, sizing_mode='stretch_width'),
+        pn.pane.Plotly(layout(fig_cmp, f'{asset_class} | {region} | Portfolio Strategy Comparison', 760), config={'responsive': True}, sizing_mode='stretch_width'),
+        pn.pane.Markdown('### Detailed Allocation Rationale'),
+        *allocation_blocks,
         sizing_mode='stretch_width'
     )
+
+
+def risk_contribution(asset_class, region, start, end, refresh_token):
+    px = fetch_matrix(get_tickers(asset_class, region), start, end, refresh_token)
+    if px.empty or px.shape[1] < 2:
+        return empty('Risk contribution unavailable', 'At least two assets with matched original Yahoo history are required.')
+    ret = px.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if ret.empty:
+        return empty('Risk contribution unavailable', 'Matched Yahoo return matrix is empty after cleaning.')
+    strategies, summary, weights = build_strategy_set(ret)
+    if weights.empty:
+        return empty('Risk contribution unavailable', 'Portfolio weights could not be computed from Yahoo returns.')
+    selected_strategy = str(summary.iloc[0]['Strategy']) if not summary.empty else weights.columns[0]
+    cov = _covariance_matrix(ret[weights.index])
+    rows = []
+    for strategy in weights.columns:
+        w = weights[strategy].reindex(ret.columns).fillna(0).values
+        port_var = float(w @ cov @ w)
+        port_vol = math.sqrt(max(port_var, 0))
+        marginal = cov @ w
+        pct_contrib = (w * marginal / port_var) if port_var > 0 else np.zeros_like(w)
+        vol_contrib = pct_contrib * port_vol
+        for ticker, wi, pc, vc in zip(ret.columns, w, pct_contrib, vol_contrib):
+            if wi > 1e-6 or abs(pc) > 1e-6:
+                rows.append({
+                    'Strategy': strategy,
+                    'Ticker': ticker,
+                    'Name': name_for(ticker),
+                    'Weight': wi,
+                    'Risk Contribution %': pc,
+                    'Vol Contribution': vc,
+                    'Marginal Risk': marginal[list(ret.columns).index(ticker)],
+                })
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return empty('Risk contribution unavailable', 'No non-zero contribution rows were produced.')
+    best_table = table[table['Strategy'].eq(selected_strategy)].copy().sort_values('Risk Contribution %', ascending=False)
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=.14, subplot_titles=[f'{selected_strategy} | Risk Contribution %', f'{selected_strategy} | Weight vs Risk Contribution'])
+    fig.add_trace(go.Bar(x=best_table['Ticker'], y=best_table['Risk Contribution %']*100, name='Risk Contribution %', text=[f'{x*100:.1f}%' for x in best_table['Risk Contribution %']], textposition='outside'), row=1, col=1)
+    fig.add_trace(go.Bar(x=best_table['Ticker'], y=best_table['Weight']*100, name='Weight %'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=best_table['Ticker'], y=best_table['Risk Contribution %']*100, name='Risk Contribution %', mode='lines+markers'), row=2, col=1)
+    fig.update_yaxes(title='Contribution (%)', row=1, col=1)
+    fig.update_yaxes(title='Weight / Contribution (%)', row=2, col=1)
+    shown = table.copy()
+    for c in ['Weight', 'Risk Contribution %', 'Vol Contribution', 'Marginal Risk']:
+        shown[c] = shown[c].map(lambda x: pct(x) if c != 'Marginal Risk' else num(x, 6))
+    cards = [
+        ('Selected Strategy', selected_strategy, 'blue'),
+        ('Largest Risk Contributor', str(best_table.iloc[0]['Ticker']), 'red'),
+        ('Largest Risk Share', pct(best_table.iloc[0]['Risk Contribution %']), 'red'),
+        ('Assets Included', str(ret.shape[1]), 'green'),
+        ('Covariance', 'Ledoit-Wolf' if SKLEARN_AVAILABLE else 'Sample', 'blue'),
+        ('Data Source', 'Yahoo only', 'green'),
+    ]
+    return pn.Column(
+        html_note('Risk contribution methodology', 'Risk contribution is computed from the annualized covariance matrix of matched Yahoo returns. Contribution_i = w_i × (Σw)_i / portfolio variance. No fallback, substitute or synthetic price history is used.'),
+        kpi_cards(cards),
+        pn.pane.Plotly(layout(fig, f'{asset_class} | {region} | Portfolio Risk Contribution', 780), config={'responsive': True}, sizing_mode='stretch_width'),
+        pn.widgets.Tabulator(shown, height=520, pagination='remote', page_size=20, sizing_mode='stretch_width'),
+        sizing_mode='stretch_width'
+    )
+
 
 def stress(asset_class, region, start, end, family, min_severity, refresh_token):
     px = fetch_matrix(get_tickers(asset_class, region), start, end, refresh_token)
@@ -736,19 +1115,22 @@ def make_app():
         pn.pane.Markdown('### Benchmark & Period'), benchmark, start, end,
         pn.pane.Markdown('### Stress Filters'), family, min_severity,
         pn.Spacer(height=8), refresh_btn, refresh,
-        html_note('System Status', f'RF: <b>{RF:.2%}</b><br>Max tickers/request: <b>{MAX_TICKERS}</b><br>Ledoit-Wolf: <b>{SKLEARN_AVAILABLE}</b><br>QuantStats: <b>{QUANTSTATS_AVAILABLE}</b><br>TA-Lib: <b>{TALIB_AVAILABLE}</b><br>MC simulations: <b>{MC_SIMULATIONS:,}</b><br>Data policy: <b>Yahoo only; no synthetic fallback.</b>'),
+        html_note('System Status', f'RF: <b>{RF:.2%}</b><br>Max tickers/request: <b>{MAX_TICKERS}</b><br>Ledoit-Wolf: <b>{SKLEARN_AVAILABLE}</b><br>QuantStats: <b>{QUANTSTATS_AVAILABLE}</b><br>TA-Lib: <b>{TALIB_AVAILABLE}</b><br>MC simulations: <b>{MC_SIMULATIONS:,}</b><br>Rolling MC: <b>{'ON' if ENABLE_ROLLING_MONTE_CARLO else 'OFF / Proxy'}</b><br>Data policy: <b>Yahoo only; no synthetic or substitute price data.</b>'),
         width=360, sizing_mode='stretch_height', styles={'background':'#f8fafc','padding':'22px','border-right':'1px solid #dbe4ef','overflow-y':'auto'}
     )
-    header = pn.pane.HTML(f'<div class="qfa-header"><div class="qfa-title">{APP_TITLE}</div><div class="qfa-subtitle">Reactive portfolio intelligence: KPI scorecard, risk analytics, benchmark-relative tracking error, optimizer, TA-Lib/fallback technicals, advanced VaR/CVaR, VaR/NAV, rolling beta, historical stress testing and tear-sheet generation. Instrument changes recompute all panes through explicit widget dependencies and refresh-token cache invalidation.</div></div>', sizing_mode='stretch_width')
+    header = pn.pane.HTML(f'<div class="qfa-header"><div class="qfa-title">{APP_TITLE}</div><div class="qfa-subtitle">Reactive portfolio intelligence: KPI scorecard, risk analytics, benchmark-relative tracking error, optimizer, TA-Lib PRO/formula technicals, Professional RiskMetrics, risk contribution, advanced VaR/CVaR, VaR/NAV, rolling beta, advanced historical stress testing and tear-sheet generation. Instrument changes recompute all panes through explicit widget dependencies and refresh-token cache invalidation.</div></div>', sizing_mode='stretch_width')
 
     tabs = pn.Tabs(
         ('Executive Dashboard', pn.bind(executive, ticker, benchmark, start, end, refresh)),
         ('Technical Dashboard', pn.bind(technical_chart, ticker, start, end, refresh)),
+        ('TA-Lib PRO Signals', pn.bind(ta_pro_dashboard, ticker, start, end, refresh)),
         ('Risk Analytics', pn.bind(risk_chart, ticker, start, end, refresh)),
+        ('Professional RiskMetrics', pn.bind(risk_metric_dashboard, ticker, benchmark, start, end, refresh)),
         ('Benchmark Relative', pn.bind(relative_chart, ticker, benchmark, start, end, refresh)),
         ('Advanced Risk Analytics', pn.bind(advanced_risk, ticker, benchmark, start, end, refresh)),
         ('Universe Board', pn.bind(universe_board, asset_class, region, start, end, refresh)),
         ('Optimizer', pn.bind(optimizer, asset_class, region, start, end, refresh)),
+        ('Risk Contribution', pn.bind(risk_contribution, asset_class, region, start, end, refresh)),
         ('Stress Testing', pn.bind(stress, asset_class, region, start, end, family, min_severity, refresh)),
         ('Tearsheet', pn.bind(tearsheet, ticker, benchmark, start, end, refresh)),
         dynamic=True, sizing_mode='stretch_width'

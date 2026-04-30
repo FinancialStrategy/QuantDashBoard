@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: qfa-prime-finance-platform
+    name: qfa-prime-finance-platform-v7
     env: python
     plan: free
     buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
@@ -12,7 +12,13 @@ services:
         value: "1"
       - key: MPLBACKEND
         value: Agg
+      - key: MPLCONFIGDIR
+        value: /tmp/matplotlib
       - key: QFA_CACHE_TTL_SECONDS
         value: "900"
       - key: QFA_MAX_TICKERS
         value: "12"
+      - key: QFA_MC_SIMULATIONS
+        value: "2500"
+      - key: QFA_ENABLE_ROLLING_MC
+        value: "0"

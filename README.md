@@ -1,37 +1,39 @@
-# QFA Prime Finance Platform V4 Render Ready
+# QFA Prime Finance Platform V7
 
-This version integrates the advanced TA-Lib and risk analytics requested from the reference code while preserving the stable V3 Render architecture.
+Render-ready institutional hedge fund dashboard.
 
-## Added in V4
+## V7 Additions
 
-- Optional TA-Lib indicator engine with formula fallback.
-- RSI, MACD, Bollinger Bands, ATR, Stochastic Oscillator, EWMA risk signal.
-- Advanced Risk Analytics tab.
-- Historical, parametric-normal, and Monte Carlo t-distribution VaR.
-- Historical and Monte Carlo CVaR snapshot cards.
-- Rolling 95% / 99% VaR backtest panel.
-- VaR / 3-month NAV ratio chart.
-- Rolling beta vs selected benchmark.
-- Historical benchmark drawdown regime table.
-- Render-safe Monte Carlo cap via `QFA_MC_SIMULATIONS`.
+- TA-Lib PRO Signals tab
+  - ADX, CCI, Williams %R, OBV, Momentum, ATR, EWMA Risk Signal.
+  - Uses TA-Lib when available; otherwise formula calculations are computed from original Yahoo OHLCV data.
+- Professional RiskMetrics tab
+  - VaR 95/99, CVaR 95/99, skewness, kurtosis, Calmar, Omega, Ulcer Index, hit ratio, tracking error, information ratio.
+- Advanced Risk Analytics
+  - Historical / parametric / Monte Carlo VaR-CVaR snapshot, rolling VaR, VaR/NAV, rolling beta, violation backtest, historical drawdown regimes.
+- Risk Contribution tab
+  - Portfolio risk contribution by strategy using the covariance matrix of matched Yahoo returns.
+- Multi-strategy optimizer
+  - Max Sharpe, Min Volatility, Max Diversification, Efficient Risk 15% Vol, HRP-style, Equal Weight.
+- Advanced Stress Testing
+  - Crisis, inflation, banking stress, selloff, rally scenario families with severity filters and KPI cards.
 
-## Render notes
+## Data Policy
 
-TA-Lib is optional. The application does not require TA-Lib to deploy. If TA-Lib is unavailable on Render, the app automatically uses the formula fallback and displays `Formula fallback` in the dashboard.
+No synthetic price data, no substitute price series, no fallback asset prices. All market calculations use original Yahoo Finance OHLCV / close data only. If Yahoo returns no usable data, the app shows a clear warning and does not fabricate data.
 
-Recommended environment variables:
+## Render
 
-```text
-QFA_MAX_TICKERS=12
-QFA_CACHE_TTL_SECONDS=900
-QFA_MC_SIMULATIONS=3000
-QFA_ADVANCED_RISK_WINDOW=252
-QFA_RISK_FREE_RATE=0.045
-```
-
-## Run locally
+Build command:
 
 ```bash
-pip install -r requirements.txt
-panel serve app.py --address 0.0.0.0 --port 10000 --allow-websocket-origin="*"
+pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
 ```
+
+Start command:
+
+```bash
+panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
+```
+
+TA-Lib remains optional because Render free Linux builds often fail without the native C library. V7 still gives institutional technical indicators through formula calculations from real Yahoo OHLCV data when TA-Lib is not installed.
