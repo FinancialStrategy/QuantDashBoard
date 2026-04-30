@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: qfa-hedge-fund-dashboard
+    name: qfa-prime-finance-platform
     env: python
     plan: free
     buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
@@ -8,7 +8,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: MPLBACKEND
-        value: Agg
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MPLBACKEND
+        value: Agg
+      - key: QFA_CACHE_TTL_SECONDS
+        value: "900"
+      - key: QFA_MAX_TICKERS
+        value: "12"

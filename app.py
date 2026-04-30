@@ -1,37 +1,63 @@
 # =============================================================================
-# QFA Hedge Fund Dashboard - Render Ready (Enhanced Advanced Risk)
-# Fully reactive Panel architecture: pn.widgets + pn.bind only
-# Yahoo-only data policy | QuantStats Tearsheet | PyPortfolioOpt | TA-Lib optional
-# Added: Advanced Historical Stress Testing, Backtested VaR/CVaR (Historical,
-# Parametric, Monte Carlo 10k sim), Rolling Beta, VaR/NAV Ratio
+# QFA PRIME HEDGE FUND PLATFORM V3 - RENDER READY
+# Reactive Panel architecture | Yahoo-only data | Institutional risk dashboard
 # =============================================================================
 
 import os
-import io
 import time
 import math
-import json
 import warnings
-import traceback
+import logging
 from pathlib import Path
-from functools import lru_cache
 from datetime import datetime, timedelta
+from functools import lru_cache
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings('ignore')
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
-
 import panel as pn
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Matplotlib / QuantStats font hygiene for Render Linux
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-plt.rcParams["font.family"] = "DejaVu Sans"
+pn.extension('plotly', 'tabulator', sizing_mode='stretch_width', notifications=True)
+
+# -----------------------------------------------------------------------------
+# Global configuration
+# -----------------------------------------------------------------------------
+APP_TITLE = 'QFA Prime Finance Platform'
+OUTPUT_DIR = Path('outputs')
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+TRADING_DAYS = 252
+RF = float(os.getenv('QFA_RISK_FREE_RATE', '0.045'))
+MIN_OBS = int(os.getenv('QFA_MIN_OBS', '90'))
+CACHE_TTL_SECONDS = int(os.getenv('QFA_CACHE_TTL_SECONDS', '900'))
+MAX_TICKERS = int(os.getenv('QFA_MAX_TICKERS', '12'))
+MC_SIMULATIONS = int(os.getenv('QFA_MC_SIMULATIONS', '3000'))
+ADVANCED_RISK_WINDOW = int(os.getenv('QFA_ADVANCED_RISK_WINDOW', '252'))
+FONT_STACK = 'DejaVu Sans, Liberation Sans, Segoe UI, Helvetica, Arial, sans-serif'
+
+# -----------------------------------------------------------------------------
+# Optional libraries
+# -----------------------------------------------------------------------------
+try:
+    from sklearn.covariance import LedoitWolf
+    SKLEARN_AVAILABLE = True
+except Exception:
+    LedoitWolf = None
+    SKLEARN_AVAILABLE = False
+
+try:
+    from scipy.optimize import minimize
+    from scipy import stats
+    SCIPY_AVAILABLE = True
+except Exception:
+    minimize = None
+    stats = None
+    SCIPY_AVAILABLE = False
 
 try:
     import quantstats as qs
@@ -47,1397 +73,688 @@ except Exception:
     talib = None
     TALIB_AVAILABLE = False
 
-try:
-    from pypfopt import expected_returns, risk_models
-    from pypfopt.efficient_frontier import EfficientFrontier
-    from pypfopt.hierarchical_portfolio import HRPOpt
-    PYPFOPT_AVAILABLE = True
-except Exception:
-    expected_returns = None
-    risk_models = None
-    EfficientFrontier = None
-    HRPOpt = None
-    PYPFOPT_AVAILABLE = False
-
-# ----- NEW IMPORTS FOR ADVANCED RISK -----
-from scipy import stats
-
 # -----------------------------------------------------------------------------
-# Panel Extension
-# -----------------------------------------------------------------------------
-pn.extension("plotly", "tabulator", sizing_mode="stretch_width", notifications=True)
-
-
-# -----------------------------------------------------------------------------
-# Global Institutional Config
-# -----------------------------------------------------------------------------
-APP_TITLE = "QFA Hedge Fund Dashboard"
-OUTPUT_DIR = Path("outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-TRADING_DAYS = 252
-RISK_FREE_RATE = 0.045  # fixed 4.5%
-MIN_OBS = 90
-CACHE_TTL_SECONDS = 900
-
-# No Arial. Keep a cross-platform stack.
-FONT_STACK = "Inter, DejaVu Sans, Segoe UI, Helvetica, Arial, sans-serif"
-
-
-# -----------------------------------------------------------------------------
-# Investment Universe (unchanged)
+# Universe: stable, liquid Yahoo instruments only. Turkish equities removed.
 # -----------------------------------------------------------------------------
 UNIVERSE = {
-    "Equity ETF": {
-        "United States": {
-            "SPY": "SPDR S&P 500 ETF",
-            "QQQ": "Invesco Nasdaq 100 ETF",
-            "IWM": "iShares Russell 2000 ETF",
-            "DIA": "SPDR Dow Jones Industrial Average ETF",
-            "VTI": "Vanguard Total Stock Market ETF",
-            "RSP": "Invesco S&P 500 Equal Weight ETF",
-            "MGK": "Vanguard Mega Cap Growth ETF",
-            "IJR": "iShares Core S&P Small-Cap ETF",
-            "VUG": "Vanguard Growth ETF",
-            "VTV": "Vanguard Value ETF",
-        },
-        "Europe": {
-            "VGK": "Vanguard FTSE Europe ETF",
-            "FEZ": "SPDR EURO STOXX 50 ETF",
-            "EWG": "iShares MSCI Germany ETF",
-            "EWQ": "iShares MSCI France ETF",
-            "EWI": "iShares MSCI Italy ETF",
-            "EWP": "iShares MSCI Spain ETF",
-        },
-        "Emerging Markets": {
-            "VWO": "Vanguard FTSE Emerging Markets ETF",
-            "EEM": "iShares MSCI Emerging Markets ETF",
-            "FXI": "iShares China Large-Cap ETF",
-            "INDA": "iShares MSCI India ETF",
-            "EWZ": "iShares MSCI Brazil ETF",
-            "EWY": "iShares MSCI South Korea ETF",
-            "EWT": "iShares MSCI Taiwan ETF",
-        },
-    },
-    "Sector ETF": {
-        "United States": {
-            "XLB": "Materials Select Sector SPDR",
-            "XLC": "Communication Services Select Sector SPDR",
-            "XLE": "Energy Select Sector SPDR",
-            "XLF": "Financials Select Sector SPDR",
-            "XLI": "Industrials Select Sector SPDR",
-            "XLK": "Technology Select Sector SPDR",
-            "XLP": "Consumer Staples Select Sector SPDR",
-            "XLRE": "Real Estate Select Sector SPDR",
-            "XLU": "Utilities Select Sector SPDR",
-            "XLV": "Health Care Select Sector SPDR",
-            "XLY": "Consumer Discretionary Select Sector SPDR",
+    'Core US Equity ETFs': {
+        'United States': {
+            'SPY': 'SPDR S&P 500 ETF', 'QQQ': 'Invesco Nasdaq 100 ETF',
+            'IWM': 'iShares Russell 2000 ETF', 'DIA': 'SPDR Dow Jones Industrial Average ETF',
+            'VTI': 'Vanguard Total Stock Market ETF', 'RSP': 'Invesco S&P 500 Equal Weight ETF',
+            'VUG': 'Vanguard Growth ETF', 'VTV': 'Vanguard Value ETF',
         }
     },
-    "Fixed Income": {
-        "United States": {
-            "SHY": "iShares 1-3 Year Treasury Bond ETF",
-            "IEF": "iShares 7-10 Year Treasury Bond ETF",
-            "TLT": "iShares 20+ Year Treasury Bond ETF",
-            "BND": "Vanguard Total Bond Market ETF",
-            "AGG": "iShares Core U.S. Aggregate Bond ETF",
-            "LQD": "iShares Investment Grade Corporate Bond ETF",
-            "HYG": "iShares High Yield Corporate Bond ETF",
-            "TIP": "iShares TIPS Bond ETF",
+    'US Sector ETFs': {
+        'United States': {
+            'XLK': 'Technology Select Sector SPDR', 'XLF': 'Financials Select Sector SPDR',
+            'XLE': 'Energy Select Sector SPDR', 'XLV': 'Health Care Select Sector SPDR',
+            'XLI': 'Industrials Select Sector SPDR', 'XLY': 'Consumer Discretionary Select Sector SPDR',
+            'XLP': 'Consumer Staples Select Sector SPDR', 'XLU': 'Utilities Select Sector SPDR',
+            'XLB': 'Materials Select Sector SPDR', 'XLRE': 'Real Estate Select Sector SPDR',
+            'XLC': 'Communication Services Select Sector SPDR',
         }
     },
-    "Commodities": {
-        "Global": {
-            "GLD": "SPDR Gold Shares",
-            "SLV": "iShares Silver Trust",
-            "USO": "United States Oil Fund",
-            "UNG": "United States Natural Gas Fund",
-            "DBC": "Invesco DB Commodity Index Tracking Fund",
-            "DBA": "Invesco DB Agriculture Fund",
-            "CPER": "United States Copper Index Fund",
+    'Global Equity ETFs': {
+        'Global': {
+            'VT': 'Vanguard Total World Stock ETF', 'VEA': 'Vanguard Developed Markets ETF',
+            'VWO': 'Vanguard FTSE Emerging Markets ETF', 'EEM': 'iShares MSCI Emerging Markets ETF',
+            'VGK': 'Vanguard FTSE Europe ETF', 'FEZ': 'SPDR EURO STOXX 50 ETF',
+            'EWJ': 'iShares MSCI Japan ETF', 'FXI': 'iShares China Large-Cap ETF',
+            'INDA': 'iShares MSCI India ETF', 'EWZ': 'iShares MSCI Brazil ETF',
         }
     },
-    "Volatility / Alternatives": {
-        "United States": {
-            "VIXY": "ProShares VIX Short-Term Futures ETF",
-            "SVXY": "ProShares Short VIX Short-Term Futures ETF",
-            "BTAL": "AGF U.S. Market Neutral Anti-Beta Fund",
-            "QAI": "IQ Hedge Multi-Strategy Tracker ETF",
-            "MNA": "IQ Merger Arbitrage ETF",
+    'Fixed Income ETFs': {
+        'United States': {
+            'SHY': 'iShares 1-3 Year Treasury Bond ETF', 'IEF': 'iShares 7-10 Year Treasury Bond ETF',
+            'TLT': 'iShares 20+ Year Treasury Bond ETF', 'BND': 'Vanguard Total Bond Market ETF',
+            'AGG': 'iShares Core U.S. Aggregate Bond ETF', 'LQD': 'iShares Investment Grade Corporate Bond ETF',
+            'HYG': 'iShares High Yield Corporate Bond ETF', 'TIP': 'iShares TIPS Bond ETF',
         }
     },
-    "Crypto Proxy": {
-        "United States": {
-            "IBIT": "iShares Bitcoin Trust",
-            "FBTC": "Fidelity Wise Origin Bitcoin Fund",
-            "BITO": "ProShares Bitcoin Strategy ETF",
-            "GBTC": "Grayscale Bitcoin Trust",
-            "ETHE": "Grayscale Ethereum Trust",
+    'Commodities & Alternatives': {
+        'Global': {
+            'GLD': 'SPDR Gold Shares', 'SLV': 'iShares Silver Trust',
+            'USO': 'United States Oil Fund', 'DBC': 'Invesco DB Commodity Index Tracking Fund',
+            'DBA': 'Invesco DB Agriculture Fund', 'CPER': 'United States Copper Index Fund',
+            'QAI': 'IQ Hedge Multi-Strategy Tracker ETF', 'MNA': 'IQ Merger Arbitrage ETF',
+        }
+    },
+    'Crypto Proxy ETFs': {
+        'United States': {
+            'IBIT': 'iShares Bitcoin Trust', 'FBTC': 'Fidelity Wise Origin Bitcoin Fund',
+            'BITO': 'ProShares Bitcoin Strategy ETF', 'GBTC': 'Grayscale Bitcoin Trust',
+            'ETHE': 'Grayscale Ethereum Trust',
         }
     },
 }
 
 BENCHMARKS = {
-    "S&P 500 Index": "^GSPC",
-    "Nasdaq 100 Index": "^NDX",
-    "Russell 2000 Index": "^RUT",
-    "Dow Jones Industrial Average": "^DJI",
-    "US Aggregate Bond ETF": "AGG",
-    "Gold ETF": "GLD",
-    "Emerging Markets ETF": "EEM",
-    "Global Equity ETF": "VT",
-    "Cash Proxy / 1-3Y Treasury ETF": "SHY",
+    'S&P 500 Index (^GSPC)': '^GSPC',
+    'Nasdaq 100 Index (^NDX)': '^NDX',
+    'Russell 2000 Index (^RUT)': '^RUT',
+    'Dow Jones Industrial Average (^DJI)': '^DJI',
+    'Global Equity ETF (VT)': 'VT',
+    'US Aggregate Bond ETF (AGG)': 'AGG',
+    'Gold ETF (GLD)': 'GLD',
+    'Cash Proxy 1-3Y Treasury (SHY)': 'SHY',
 }
 
-STRESS_SCENARIOS = {
-    "Equity Shock -10%": -0.10,
-    "Equity Shock -20%": -0.20,
-    "Sharp Rally +10%": 0.10,
-    "Rate Shock Proxy -5%": -0.05,
-    "Liquidity Shock -7.5%": -0.075,
-}
-
+STRESS_SCENARIOS = pd.DataFrame([
+    ('Crisis', 'Global equity shock -20%', -0.20, 1.20),
+    ('Crisis', 'Liquidity shock -10%', -0.10, 1.60),
+    ('Inflation', 'Rates/inflation shock -8%', -0.08, 1.10),
+    ('Banking Stress', 'Credit stress -12%', -0.12, 1.40),
+    ('Sharp Selloff', 'Risk asset selloff -15%', -0.15, 1.25),
+    ('Sharp Rally', 'Risk asset rally +10%', 0.10, 0.80),
+], columns=['Family', 'Scenario', 'Shock', 'Severity Multiplier'])
 
 # -----------------------------------------------------------------------------
-# Helpers (unchanged except for additions)
+# Helpers
 # -----------------------------------------------------------------------------
-def flatten_universe() -> pd.DataFrame:
+def all_tickers():
     rows = []
     for asset_class, regions in UNIVERSE.items():
-        for region, instruments in regions.items():
-            for ticker, name in instruments.items():
-                rows.append(
-                    {
-                        "Asset Class": asset_class,
-                        "Region": region,
-                        "Ticker": ticker,
-                        "Name": name,
-                    }
-                )
+        for region, d in regions.items():
+            for ticker, name in d.items():
+                rows.append({'Asset Class': asset_class, 'Region': region, 'Ticker': ticker, 'Name': name})
     return pd.DataFrame(rows)
 
+UNIVERSE_DF = all_tickers()
 
-UNIVERSE_DF = flatten_universe()
-
-
-def get_regions(asset_class: str):
+def get_regions(asset_class):
     return list(UNIVERSE.get(asset_class, {}).keys())
 
-
-def get_tickers(asset_class: str, region: str):
+def get_tickers(asset_class, region):
     return list(UNIVERSE.get(asset_class, {}).get(region, {}).keys())
 
+def name_for(ticker):
+    m = UNIVERSE_DF.loc[UNIVERSE_DF['Ticker'].eq(ticker), 'Name']
+    return ticker if m.empty else str(m.iloc[0])
 
-def get_name(ticker: str) -> str:
-    row = UNIVERSE_DF.loc[UNIVERSE_DF["Ticker"] == ticker]
-    if row.empty:
-        return ticker
-    return str(row.iloc[0]["Name"])
+def pct(x, d=2):
+    if x is None or not np.isfinite(x):
+        return '—'
+    return f'{x*100:.{d}f}%'
 
+def num(x, d=2):
+    if x is None or not np.isfinite(x):
+        return '—'
+    return f'{x:.{d}f}'
 
-def normalize_date(x):
-    if x is None:
-        return None
-    if isinstance(x, datetime):
-        return x.strftime("%Y-%m-%d")
-    if hasattr(x, "strftime"):
-        return x.strftime("%Y-%m-%d")
-    return str(x)[:10]
+def today_bucket(refresh_token=0):
+    # TTL bucket + explicit refresh token guarantees Render does not show stale Yahoo data forever.
+    return int(time.time() // CACHE_TTL_SECONDS) + int(refresh_token) * 10_000_000
 
-
-def fmt_pct(x, digits=2):
+@lru_cache(maxsize=2048)
+def _download_one(ticker, start_s, end_s, bucket):
     try:
-        if x is None or pd.isna(x) or np.isinf(x):
-            return "N/A"
-        return f"{x*100:.{digits}f}%"
-    except Exception:
-        return "N/A"
-
-
-def fmt_num(x, digits=2):
-    try:
-        if x is None or pd.isna(x) or np.isinf(x):
-            return "N/A"
-        return f"{x:.{digits}f}"
-    except Exception:
-        return "N/A"
-
-
-def status_badge(label: str, ok: bool):
-    color = "#166534" if ok else "#991b1b"
-    bg = "#dcfce7" if ok else "#fee2e2"
-    return f"""
-    <span style="background:{bg};color:{color};padding:4px 9px;border-radius:999px;
-    font-size:12px;font-weight:700;">{label}</span>
-    """
-
-
-# -----------------------------------------------------------------------------
-# Yahoo-only Data Layer (unchanged)
-# -----------------------------------------------------------------------------
-@lru_cache(maxsize=512)
-def fetch_ohlcv_cached(ticker: str, start: str, end: str, cache_bucket: int) -> pd.DataFrame:
-    try:
-        df = yf.download(
-            ticker,
-            start=start,
-            end=end,
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-            timeout=25,
-        )
-
+        df = yf.download(ticker, start=start_s, end=end_s, progress=False, auto_adjust=False, threads=False)
         if df is None or df.empty:
             return pd.DataFrame()
-
         if isinstance(df.columns, pd.MultiIndex):
-            if ticker in df.columns.get_level_values(-1):
-                df = df.xs(ticker, axis=1, level=-1)
-            else:
-                df.columns = df.columns.get_level_values(0)
-
-        required = ["Open", "High", "Low", "Close", "Volume"]
-        if "Close" not in df.columns:
-            return pd.DataFrame()
-
-        for col in required:
-            if col not in df.columns:
-                if col == "Volume":
-                    df[col] = np.nan
-                else:
-                    df[col] = df["Close"]
-
-        df = df[required].copy()
-        df.index = pd.to_datetime(df.index)
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.dropna(subset=["Close"])
-
-        if len(df) < 2:
-            return pd.DataFrame()
-
-        return df
-
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+        keep = [c for c in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'] if c in df.columns]
+        out = df[keep].copy()
+        out['Close'] = pd.to_numeric(out[price_col], errors='coerce')
+        for c in ['Open', 'High', 'Low', 'Volume']:
+            if c not in out.columns:
+                out[c] = out['Close']
+            out[c] = pd.to_numeric(out[c], errors='coerce')
+        out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=['Close'])
+        out = out[~out.index.duplicated(keep='last')].sort_index()
+        return out
     except Exception:
         return pd.DataFrame()
 
+def fetch_one(ticker, start, end, refresh_token=0):
+    s = pd.Timestamp(start).strftime('%Y-%m-%d')
+    e = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    return _download_one(str(ticker), s, e, today_bucket(refresh_token)).copy()
 
-def cache_bucket():
-    return int(time.time() // CACHE_TTL_SECONDS)
-
-
-def fetch_ohlcv(ticker: str, start, end) -> pd.DataFrame:
-    start_s = normalize_date(start)
-    end_s = normalize_date(end)
-    return fetch_ohlcv_cached(ticker, start_s, end_s, cache_bucket()).copy()
-
-
-def fetch_price_matrix(tickers, start, end) -> pd.DataFrame:
-    series = {}
-    rejected = []
-
-    for ticker in tickers:
-        df = fetch_ohlcv(ticker, start, end)
-        if df.empty:
-            rejected.append(ticker)
-            continue
-        series[ticker] = df["Close"]
-
-    if not series:
+def fetch_matrix(tickers, start, end, refresh_token=0):
+    frames = []
+    for t in list(tickers)[:MAX_TICKERS]:
+        d = fetch_one(t, start, end, refresh_token)
+        if not d.empty:
+            frames.append(d['Close'].rename(t))
+    if not frames:
         return pd.DataFrame()
+    px = pd.concat(frames, axis=1).sort_index().ffill(limit=3).dropna(how='all')
+    px = px.dropna(axis=1, thresh=max(MIN_OBS, int(len(px) * 0.60)))
+    return px.dropna()
 
-    prices = pd.DataFrame(series).sort_index()
-    prices = prices.dropna(how="all")
-    prices = prices.ffill(limit=3)
-    min_count = max(MIN_OBS, int(len(prices) * 0.70))
-    prices = prices.dropna(axis=1, thresh=min_count)
-    prices = prices.dropna()
-
-    return prices
-
-
-# -----------------------------------------------------------------------------
-# Indicators (unchanged)
-# -----------------------------------------------------------------------------
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    d = df.copy()
-    d["Return"] = d["Close"].pct_change()
-    d["Log Return"] = np.log(d["Close"] / d["Close"].shift(1))
-    d["Cumulative Return"] = (1 + d["Return"].fillna(0)).cumprod() - 1
-
-    d["MA20"] = d["Close"].rolling(20).mean()
-    d["MA50"] = d["Close"].rolling(50).mean()
-    d["MA200"] = d["Close"].rolling(200).mean()
-
-    d["Vol21"] = d["Return"].rolling(21).std() * np.sqrt(TRADING_DAYS)
-    d["Vol63"] = d["Return"].rolling(63).std() * np.sqrt(TRADING_DAYS)
-
-    wealth = (1 + d["Return"].fillna(0)).cumprod()
-    d["Drawdown"] = wealth / wealth.cummax() - 1
-
+def add_features(df):
+    """TA-Lib-first technical indicator layer with Render-safe fallback."""
+    if df.empty:
+        return df
+    out = df.copy()
+    out['Return'] = out['Close'].pct_change()
+    out['Log Return'] = np.log(out['Close'] / out['Close'].shift(1))
+    out['CumReturn'] = (1 + out['Return'].fillna(0)).cumprod() - 1
+    out['MA20'] = out['Close'].rolling(20).mean()
+    out['MA50'] = out['Close'].rolling(50).mean()
+    out['MA200'] = out['Close'].rolling(200).mean()
+    out['Vol21'] = out['Return'].rolling(21).std() * math.sqrt(TRADING_DAYS)
+    out['Vol63'] = out['Return'].rolling(63).std() * math.sqrt(TRADING_DAYS)
+    wealth = (1 + out['Return'].fillna(0)).cumprod()
+    out['Drawdown'] = wealth / wealth.cummax() - 1
+    used_talib = False
     if TALIB_AVAILABLE:
         try:
-            close = d["Close"].astype(float).values
-            high = d["High"].astype(float).values
-            low = d["Low"].astype(float).values
-
-            d["RSI"] = talib.RSI(close, timeperiod=14)
+            close = out['Close'].astype(float).values
+            high = out['High'].astype(float).values
+            low = out['Low'].astype(float).values
+            out['RSI'] = talib.RSI(close, timeperiod=14)
             macd, signal, hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
-            d["MACD"] = macd
-            d["MACD Signal"] = signal
-            d["MACD Hist"] = hist
-
+            out['MACD'], out['MACD Signal'], out['MACD Hist'] = macd, signal, hist
             upper, mid, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2)
-            d["BB Upper"] = upper
-            d["BB Mid"] = mid
-            d["BB Lower"] = lower
-            d["ATR"] = talib.ATR(high, low, close, timeperiod=14)
-
-            slowk, slowd = talib.STOCH(
-                high, low, close,
-                fastk_period=14,
-                slowk_period=3,
-                slowd_period=3,
-            )
-            d["Stoch K"] = slowk
-            d["Stoch D"] = slowd
-            d["Indicator Engine"] = "TA-Lib"
-            return d
+            out['BB Upper'], out['BB Mid'], out['BB Lower'] = upper, mid, lower
+            out['ATR'] = talib.ATR(high, low, close, timeperiod=14)
+            slowk, slowd = talib.STOCH(high, low, close, fastk_period=14, slowk_period=3, slowd_period=3)
+            out['Stoch K'], out['Stoch D'] = slowk, slowd
+            used_talib = True
         except Exception:
-            pass
+            used_talib = False
+    if not used_talib:
+        mid = out['Close'].rolling(20).mean()
+        sd = out['Close'].rolling(20).std()
+        out['BB Upper'], out['BB Mid'], out['BB Lower'] = mid + 2 * sd, mid, mid - 2 * sd
+        delta = out['Close'].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        out['RSI'] = 100 - (100 / (1 + rs))
+        ema12 = out['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = out['Close'].ewm(span=26, adjust=False).mean()
+        out['MACD'] = ema12 - ema26
+        out['MACD Signal'] = out['MACD'].ewm(span=9, adjust=False).mean()
+        out['MACD Hist'] = out['MACD'] - out['MACD Signal']
+        tr = pd.concat([out['High'] - out['Low'], (out['High'] - out['Close'].shift()).abs(), (out['Low'] - out['Close'].shift()).abs()], axis=1).max(axis=1)
+        out['ATR'] = tr.rolling(14).mean()
+        low14 = out['Low'].rolling(14).min()
+        high14 = out['High'].rolling(14).max()
+        out['Stoch K'] = 100 * (out['Close'] - low14) / (high14 - low14).replace(0, np.nan)
+        out['Stoch D'] = out['Stoch K'].rolling(3).mean()
+    ew22 = out['Return'].ewm(span=22, adjust=False).std() * math.sqrt(TRADING_DAYS)
+    ew33 = out['Return'].ewm(span=33, adjust=False).std() * math.sqrt(TRADING_DAYS)
+    ew99 = out['Return'].ewm(span=99, adjust=False).std() * math.sqrt(TRADING_DAYS)
+    out['EWMA Risk Signal'] = ew22 / ((ew33 + ew99) / 2).replace(0, np.nan)
+    out['Indicator Engine'] = 'TA-Lib' if used_talib else 'Formula fallback'
+    return out
 
-    # Fallback indicators
-    delta = d["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    d["RSI"] = 100 - (100 / (1 + rs))
-
-    ema12 = d["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = d["Close"].ewm(span=26, adjust=False).mean()
-    d["MACD"] = ema12 - ema26
-    d["MACD Signal"] = d["MACD"].ewm(span=9, adjust=False).mean()
-    d["MACD Hist"] = d["MACD"] - d["MACD Signal"]
-
-    d["BB Mid"] = d["Close"].rolling(20).mean()
-    bb_std = d["Close"].rolling(20).std()
-    d["BB Upper"] = d["BB Mid"] + 2 * bb_std
-    d["BB Lower"] = d["BB Mid"] - 2 * bb_std
-
-    tr = pd.concat(
-        [
-            d["High"] - d["Low"],
-            (d["High"] - d["Close"].shift()).abs(),
-            (d["Low"] - d["Close"].shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    d["ATR"] = tr.rolling(14).mean()
-
-    low14 = d["Low"].rolling(14).min()
-    high14 = d["High"].rolling(14).max()
-    d["Stoch K"] = 100 * (d["Close"] - low14) / (high14 - low14)
-    d["Stoch D"] = d["Stoch K"].rolling(3).mean()
-    d["Indicator Engine"] = "Formula fallback"
-
-    return d
-
-
-# -----------------------------------------------------------------------------
-# Risk Engine (unchanged)
-# -----------------------------------------------------------------------------
-def risk_metrics(returns: pd.Series, rf: float = RISK_FREE_RATE) -> dict:
-    r = pd.Series(returns).replace([np.inf, -np.inf], np.nan).dropna()
-
-    if len(r) < 30:
-        return {k: np.nan for k in [
-            "Ann Return", "Ann Vol", "Sharpe", "Sortino", "Max Drawdown",
-            "VaR 95", "CVaR 95", "VaR 99", "CVaR 99", "Skew", "Kurtosis",
-            "Win Rate", "Calmar", "Omega"
-        ]}
-
-    ann_return = (1 + r.mean()) ** TRADING_DAYS - 1
-    ann_vol = r.std() * np.sqrt(TRADING_DAYS)
-    sharpe = (ann_return - rf) / ann_vol if ann_vol > 0 else np.nan
-
-    downside = r[r < 0].std() * np.sqrt(TRADING_DAYS)
-    sortino = (ann_return - rf) / downside if downside and downside > 0 else np.nan
-
+def metrics(r):
+    r = pd.Series(r).dropna()
+    if len(r) < 5:
+        return {}
+    ann_ret = (1 + r).prod() ** (TRADING_DAYS / len(r)) - 1
+    ann_vol = r.std() * math.sqrt(TRADING_DAYS)
+    downside = r[r < 0].std() * math.sqrt(TRADING_DAYS)
     wealth = (1 + r).cumprod()
     dd = wealth / wealth.cummax() - 1
-    max_dd = dd.min()
-
     var95 = r.quantile(0.05)
-    cvar95 = r[r <= var95].mean()
-    var99 = r.quantile(0.01)
-    cvar99 = r[r <= var99].mean()
-
-    calmar = ann_return / abs(max_dd) if max_dd < 0 else np.nan
-    gains = r[r > 0].sum()
-    losses = abs(r[r < 0].sum())
-    omega = gains / losses if losses > 0 else np.nan
-
+    cvar95 = r[r <= var95].mean() if len(r[r <= var95]) else np.nan
     return {
-        "Ann Return": ann_return,
-        "Ann Vol": ann_vol,
-        "Sharpe": sharpe,
-        "Sortino": sortino,
-        "Max Drawdown": max_dd,
-        "VaR 95": var95,
-        "CVaR 95": cvar95,
-        "VaR 99": var99,
-        "CVaR 99": cvar99,
-        "Skew": r.skew(),
-        "Kurtosis": r.kurtosis(),
-        "Win Rate": (r > 0).mean(),
-        "Calmar": calmar,
-        "Omega": omega,
+        'Ann Return': ann_ret,
+        'Ann Vol': ann_vol,
+        'Sharpe': (ann_ret - RF) / ann_vol if ann_vol else np.nan,
+        'Sortino': (ann_ret - RF) / downside if downside else np.nan,
+        'Max Drawdown': dd.min(),
+        'VaR 95': var95,
+        'CVaR 95': cvar95,
+        'Hit Ratio': (r > 0).mean(),
+        'Obs': len(r),
     }
 
+def active_metrics(asset_r, bench_r):
+    x = pd.concat([asset_r.rename('asset'), bench_r.rename('bench')], axis=1).dropna()
+    if len(x) < MIN_OBS:
+        return {}
+    active = x['asset'] - x['bench']
+    te = active.std() * math.sqrt(TRADING_DAYS)
+    alpha = active.mean() * TRADING_DAYS
+    beta = x['asset'].cov(x['bench']) / x['bench'].var() if x['bench'].var() else np.nan
+    return {'Tracking Error': te, 'Information Ratio': alpha / te if te else np.nan, 'Active Return': alpha, 'Beta': beta}
 
-def active_metrics(asset_returns: pd.Series, benchmark_returns: pd.Series) -> dict:
-    joined = pd.concat([asset_returns.rename("asset"), benchmark_returns.rename("bench")], axis=1).dropna()
-    if len(joined) < 30:
-        return {k: np.nan for k in ["Tracking Error", "Information Ratio", "Beta", "Alpha", "Correlation"]}
-
-    active = joined["asset"] - joined["bench"]
-    te = active.std() * np.sqrt(TRADING_DAYS)
-    ir = (active.mean() * TRADING_DAYS) / te if te > 0 else np.nan
-
-    cov = np.cov(joined["asset"], joined["bench"])[0, 1]
-    var = np.var(joined["bench"])
-    beta = cov / var if var > 0 else np.nan
-    alpha = (joined["asset"].mean() * TRADING_DAYS) - beta * (joined["bench"].mean() * TRADING_DAYS) if pd.notna(beta) else np.nan
-    corr = joined["asset"].corr(joined["bench"])
-
-    return {
-        "Tracking Error": te,
-        "Information Ratio": ir,
-        "Beta": beta,
-        "Alpha": alpha,
-        "Correlation": corr,
-    }
-
-
-# -----------------------------------------------------------------------------
-# Styling / Layout (unchanged)
-# -----------------------------------------------------------------------------
-def css():
-    return f"""
-    <style>
-    body, .bk-root, .bk, .bk-input, .bk-btn {{
-        font-family: {FONT_STACK};
-    }}
-    .qfa-header {{
-        background: linear-gradient(90deg, #0f172a, #172554, #1e293b);
-        color: white;
-        padding: 24px 28px;
-        border-radius: 18px;
-        box-shadow: 0 8px 30px rgba(15,23,42,.18);
-        margin-bottom: 16px;
-    }}
-    .qfa-title {{
-        font-size: 30px;
-        font-weight: 850;
-        letter-spacing: -0.03em;
-    }}
-    .qfa-subtitle {{
-        color: #cbd5e1;
-        font-size: 14px;
-        margin-top: 7px;
-        line-height: 1.5;
-    }}
-    .kpi-grid {{
-        display: grid;
-        grid-template-columns: repeat(4, minmax(160px, 1fr));
-        gap: 12px;
-        margin-bottom: 14px;
-    }}
-    .kpi-card {{
-        background: #ffffff;
-        border: 1px solid #dbe4ef;
-        border-radius: 16px;
-        padding: 14px 16px;
-        box-shadow: 0 2px 12px rgba(15,23,42,.055);
-    }}
-    .kpi-card.pos {{ background: #f0fdf4; border-color: #86efac; }}
-    .kpi-card.neg {{ background: #fff1f2; border-color: #fca5a5; }}
-    .kpi-card.warn {{ background: #fffbeb; border-color: #fcd34d; }}
-    .kpi-label {{
-        color: #64748b;
-        font-size: 12px;
-        font-weight: 750;
-        text-transform: uppercase;
-        letter-spacing: .04em;
-    }}
-    .kpi-value {{
-        color: #0f172a;
-        font-size: 22px;
-        font-weight: 850;
-        margin-top: 6px;
-        white-space: nowrap;
-    }}
-    .qfa-note {{
-        background: #f8fafc;
-        border: 1px solid #dbe4ef;
-        border-radius: 14px;
-        padding: 12px 14px;
-        color: #334155;
-        font-size: 13px;
-        line-height: 1.45;
-    }}
-    </style>
-    """
-
-
-def make_kpi_cards(ticker, benchmark_label, metrics, active=None, engine_label=""):
-    active = active or {}
-    cards = [
-        ("Instrument", ticker, ""),
-        ("Benchmark", benchmark_label, ""),
-        ("Annual Return", fmt_pct(metrics.get("Ann Return")), "pos" if metrics.get("Ann Return", 0) > 0 else "neg"),
-        ("Annual Volatility", fmt_pct(metrics.get("Ann Vol")), ""),
-        ("Sharpe @ RF 4.5%", fmt_num(metrics.get("Sharpe"), 2), "pos" if metrics.get("Sharpe", 0) > 1 else "warn"),
-        ("Sortino", fmt_num(metrics.get("Sortino"), 2), "pos" if metrics.get("Sortino", 0) > 1 else "warn"),
-        ("Max Drawdown", fmt_pct(metrics.get("Max Drawdown")), "neg"),
-        ("CVaR 95", fmt_pct(metrics.get("CVaR 95")), "neg"),
-        ("Tracking Error", fmt_pct(active.get("Tracking Error")), ""),
-        ("Information Ratio", fmt_num(active.get("Information Ratio"), 2), "pos" if active.get("Information Ratio", 0) > 0 else "warn"),
-        ("Beta", fmt_num(active.get("Beta"), 2), ""),
-        ("TA Engine", engine_label, ""),
-    ]
-
-    html = '<div class="kpi-grid">'
-    for label, value, tone in cards:
-        html += f"""
-        <div class="kpi-card {tone}">
-            <div class="kpi-label">{label}</div>
-            <div class="kpi-value">{value}</div>
-        </div>
-        """
-    html += "</div>"
-    return pn.pane.HTML(html, sizing_mode="stretch_width")
-
-
-def empty_state(title, detail):
-    return pn.Column(
-        pn.pane.HTML(
-            f"""
-            <div class="qfa-note">
-                <b>{title}</b><br>{detail}
-            </div>
-            """,
-            sizing_mode="stretch_width",
-        ),
-        sizing_mode="stretch_width",
-    )
-
-
-def chart_layout(fig, title, height=720):
+def layout(fig, title, height=720):
     fig.update_layout(
-        title=dict(text=title, x=0.01, xanchor="left", font=dict(size=20)),
-        template="plotly_white",
-        height=height,
-        margin=dict(l=46, r=28, t=78, b=48),
-        font=dict(family="DejaVu Sans, Segoe UI, Helvetica, sans-serif", size=12, color="#1e293b"),
-        paper_bgcolor="#ffffff",
-        plot_bgcolor="#ffffff",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+        title=dict(text=title, x=0.01, xanchor='left', font=dict(size=21, color='#0f172a')),
+        template='plotly_white', height=height, autosize=True,
+        margin=dict(l=58, r=32, t=82, b=60),
+        font=dict(family=FONT_STACK, size=12, color='#1e293b'),
+        paper_bgcolor='white', plot_bgcolor='white', hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='right', x=1),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(203,213,225,.48)", zeroline=False, rangeslider_visible=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(203,213,225,.48)", zeroline=False)
+    fig.update_xaxes(showgrid=True, gridcolor='rgba(203,213,225,.45)', zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor='rgba(203,213,225,.45)', zeroline=False)
     return fig
 
+def html_note(title, body):
+    return pn.pane.HTML(f'<div class="qfa-note"><b>{title}</b><br>{body}</div>', sizing_mode='stretch_width')
 
-# =============================================================================
-# NEW: Advanced VaR / CVaR computation methods (empirical, parametric, Monte Carlo)
-# =============================================================================
-def historical_var(returns: pd.Series, confidence: float) -> float:
-    """Empirical VaR at given confidence level."""
-    return returns.quantile(1 - confidence)
+def empty(title, body):
+    return pn.pane.HTML(f'<div class="qfa-empty"><h3>{title}</h3><p>{body}</p></div>', sizing_mode='stretch_width')
 
-def historical_cvar(returns: pd.Series, confidence: float) -> float:
-    """Empirical CVaR (Expected Shortfall)."""
-    var = historical_var(returns, confidence)
-    return returns[returns <= var].mean()
+def css():
+    return f'''
+    <style>
+    body, .bk-root {{ font-family:{FONT_STACK}; background:#f8fafc; }}
+    .qfa-header {{ background:linear-gradient(135deg,#07111f,#0f2742); color:white; border-radius:24px; padding:28px 32px; margin-bottom:18px; box-shadow:0 16px 36px rgba(15,23,42,.18); }}
+    .qfa-title {{ font-size:40px; line-height:1.05; font-weight:900; letter-spacing:-.025em; }}
+    .qfa-subtitle {{ font-size:15px; color:#cbd5e1; margin-top:10px; max-width:1180px; line-height:1.55; }}
+    .qfa-note {{ background:#f8fafc; border:1px solid #dbe4ef; border-left:5px solid #0f2742; padding:14px 16px; border-radius:16px; color:#334155; font-size:13px; line-height:1.45; margin:8px 0; }}
+    .qfa-empty {{ background:#fff7ed; border:1px solid #fed7aa; border-radius:18px; padding:24px; color:#7c2d12; }}
+    .kpi-grid {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:14px; margin-bottom:18px; }}
+    .kpi-card {{ background:white; border:1px solid #dbe4ef; border-radius:20px; padding:18px 18px; box-shadow:0 10px 26px rgba(15,23,42,.07); }}
+    .kpi-label {{ font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#64748b; font-weight:800; }}
+    .kpi-value {{ font-size:27px; font-weight:900; color:#0f172a; margin-top:5px; }}
+    .tone-green {{ border-top:5px solid #166534; }} .tone-red {{ border-top:5px solid #991b1b; }} .tone-amber {{ border-top:5px solid #b45309; }} .tone-blue {{ border-top:5px solid #1d4ed8; }}
+    @media (max-width:1200px) {{ .kpi-grid {{ grid-template-columns:repeat(2,minmax(160px,1fr)); }} .qfa-title {{ font-size:32px; }} }}
+    </style>
+    '''
 
-def parametric_var(returns: pd.Series, confidence: float) -> float:
-    """Parametric VaR assuming normal distribution."""
-    mu = returns.mean()
-    sigma = returns.std()
-    return mu + sigma * stats.norm.ppf(1 - confidence)
+def kpi_cards(items):
+    html = '<div class="kpi-grid">'
+    for label, value, tone in items:
+        html += f'<div class="kpi-card tone-{tone}"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>'
+    html += '</div>'
+    return pn.pane.HTML(html, sizing_mode='stretch_width')
 
-def parametric_cvar(returns: pd.Series, confidence: float) -> float:
-    """Parametric CVaR under normal distribution."""
-    mu = returns.mean()
-    sigma = returns.std()
-    var = parametric_var(returns, confidence)
-    # CVaR for normal: mu - sigma * pdf(ppf) / (1-confidence)
-    return mu - sigma * stats.norm.pdf(stats.norm.ppf(1 - confidence)) / (1 - confidence)
+# -----------------------------------------------------------------------------
+# Advanced risk engine: VaR/CVaR, VaR/NAV, rolling beta, historical stress regimes
+# -----------------------------------------------------------------------------
+def historical_var(r, confidence):
+    r = pd.Series(r).dropna()
+    return r.quantile(1 - confidence) if len(r) else np.nan
 
-def monte_carlo_var(returns: pd.Series, confidence: float, num_sim: int = 10000, dist: str = 't') -> float:
-    """
-    Monte Carlo VaR using fitted distribution (normal or t).
-    By default uses a t-distribution fitting to capture fat tails.
-    """
-    if len(returns) < 30:
+def historical_cvar(r, confidence):
+    r = pd.Series(r).dropna()
+    v = historical_var(r, confidence)
+    tail = r[r <= v]
+    return tail.mean() if len(tail) else np.nan
+
+def parametric_var(r, confidence):
+    r = pd.Series(r).dropna()
+    if len(r) < 5 or stats is None:
         return np.nan
-    if dist == 'normal':
-        mu = returns.mean()
-        sigma = returns.std()
-        simulated = np.random.normal(mu, sigma, num_sim)
-    else:  # t-distribution
-        params = stats.t.fit(returns.dropna())
-        simulated = stats.t.rvs(df=params[0], loc=params[1], scale=params[2], size=num_sim)
-    return np.percentile(simulated, 100 * (1 - confidence))
+    return r.mean() + r.std() * stats.norm.ppf(1 - confidence)
 
-def monte_carlo_cvar(returns: pd.Series, confidence: float, num_sim: int = 10000, dist: str = 't') -> float:
-    """Monte Carlo CVaR."""
-    if len(returns) < 30:
+def parametric_cvar(r, confidence):
+    r = pd.Series(r).dropna()
+    if len(r) < 5 or stats is None:
         return np.nan
-    if dist == 'normal':
-        mu = returns.mean()
-        sigma = returns.std()
-        simulated = np.random.normal(mu, sigma, num_sim)
-    else:
-        params = stats.t.fit(returns.dropna())
-        simulated = stats.t.rvs(df=params[0], loc=params[1], scale=params[2], size=num_sim)
-    var = np.percentile(simulated, 100 * (1 - confidence))
-    return simulated[simulated <= var].mean()
+    z = stats.norm.ppf(1 - confidence)
+    return r.mean() - r.std() * stats.norm.pdf(z) / (1 - confidence)
 
+def monte_carlo_tail(r, confidence, n=None, dist='t', seed=42):
+    r = pd.Series(r).dropna()
+    n = int(n or MC_SIMULATIONS)
+    if len(r) < 30 or stats is None:
+        return np.nan, np.nan
+    rng = np.random.default_rng(seed)
+    try:
+        if dist == 'normal':
+            sim = rng.normal(r.mean(), r.std(), n)
+        else:
+            df, loc, scale = stats.t.fit(r)
+            if not np.isfinite(df) or not np.isfinite(scale) or scale <= 0:
+                sim = rng.normal(r.mean(), r.std(), n)
+            else:
+                sim = stats.t.rvs(df=df, loc=loc, scale=scale, size=n, random_state=rng)
+        var = np.percentile(sim, 100 * (1 - confidence))
+        cvar = sim[sim <= var].mean()
+        return float(var), float(cvar)
+    except Exception:
+        return np.nan, np.nan
 
-# -----------------------------------------------------------------------------
-# Rolling VaR/CVaR + VaR/NAV ratio computation
-# -----------------------------------------------------------------------------
-def compute_rolling_var(returns: pd.Series, window: int, confidence: float, method: str) -> pd.Series:
-    """
-    Compute rolling VaR using specified method.
-    methods: 'historical', 'parametric', 'montecarlo'
-    """
-    roll = returns.rolling(window, min_periods=min(window, int(0.7*window))).apply(
-        lambda x: {
-            'historical': historical_var,
-            'parametric': parametric_var,
-            'montecarlo': monte_carlo_var
-        }[method](x, confidence),
-        raw=False
-    )
-    return roll
+def rolling_var_series(r, window, confidence, method):
+    r = pd.Series(r).dropna()
+    minp = max(60, int(window * 0.70))
+    if method == 'historical':
+        return r.rolling(window, min_periods=minp).quantile(1 - confidence)
+    if method == 'parametric':
+        mean = r.rolling(window, min_periods=minp).mean()
+        sd = r.rolling(window, min_periods=minp).std()
+        z = stats.norm.ppf(1 - confidence) if stats is not None else np.nan
+        return mean + sd * z
+    tail = r.tail(max(window + 170, 420))
+    out = pd.Series(index=r.index, dtype=float)
+    vals = []
+    for i in range(len(tail)):
+        x = tail.iloc[max(0, i-window+1):i+1]
+        vals.append(monte_carlo_tail(x, confidence, seed=1000 + i)[0] if len(x) >= minp else np.nan)
+    out.loc[tail.index] = vals
+    return out
 
-def compute_rolling_cvar(returns: pd.Series, window: int, confidence: float, method: str) -> pd.Series:
-    roll = returns.rolling(window, min_periods=min(window, int(0.7*window))).apply(
-        lambda x: {
-            'historical': historical_cvar,
-            'parametric': parametric_cvar,
-            'montecarlo': monte_carlo_cvar
-        }[method](x, confidence),
-        raw=False
-    )
-    return roll
+def var_nav_ratio(price, r, window=ADVANCED_RISK_WINDOW, confidence=.95, method='historical'):
+    v = rolling_var_series(r, window, confidence, method).shift(1).abs()
+    nav = price.rolling(63, min_periods=21).mean().replace(0, np.nan)
+    return (price * v / nav) * 100
 
-def compute_var_nav_ratio(price: pd.Series, returns: pd.Series, window_var: int, window_nav: int,
-                          confidence: float, method: str) -> pd.Series:
-    """
-    Compute rolling Var as a percentage of a rolling 3-month average price (NAV).
-    Var is daily dollar Var per share (price * return VaR). Then divided by mean price over 3 months.
-    """
-    # Dollar VaR: current price * VaR estimate (percentage)
-    # We'll compute rolling VaR on percentage returns first, then multiply by price.
-    roll_var = compute_rolling_var(returns, window_var, confidence, method)
-    # Avoid look-ahead bias: VaR for day t is based on returns up to t-1 (rolling window). So shift?
-    # We'll align: use shifted VaR to multiply with current day price for that day's risk.
-    # roll_var corresponds to index of returns; we shift by 1 so that today's VaR uses yesterday's estimate.
-    roll_var_shifted = roll_var.shift(1)
-    dollar_var = price * abs(roll_var_shifted)  # VaR is negative; we take absolute for ratio
-    # 3-month rolling average price (around 63 trading days)
-    nav_avg = price.rolling(window_nav, min_periods=max(window_nav//2, 21)).mean()
-    ratio = (dollar_var / nav_avg.replace(0, np.nan)) * 100  # percentage
-    return ratio
+def rolling_beta_series(asset_r, bench_r, window=ADVANCED_RISK_WINDOW):
+    joined = pd.concat([asset_r.rename('asset'), bench_r.rename('bench')], axis=1).dropna()
+    if joined.empty:
+        return pd.Series(dtype=float)
+    minp = max(60, int(window * .70))
+    cov = joined['asset'].rolling(window, min_periods=minp).cov(joined['bench'])
+    var = joined['bench'].rolling(window, min_periods=minp).var()
+    return cov / var.replace(0, np.nan)
 
-
-# -----------------------------------------------------------------------------
-# Rolling Beta to ^GSPC
-# -----------------------------------------------------------------------------
-def rolling_beta(asset_returns: pd.Series, bench_returns: pd.Series, window: int) -> pd.Series:
-    """Rolling beta computed via covariance/variance."""
-    joined = pd.concat([asset_returns.rename("asset"), bench_returns.rename("bench")], axis=1).dropna()
-    cov = joined.rolling(window).cov(pairwise=True)
-    var = joined["bench"].rolling(window).var()
-    # Cov returns multiindex; extract series for (asset, bench)
-    cov_series = cov.iloc[:, cov.columns.get_level_values(1) == "bench"].xs("asset", axis=1, level=0)
-    # Might need adjustment: simpler approach
-    beta = cov_series.squeeze() / var
-    return beta
-
-
-# -----------------------------------------------------------------------------
-# Advanced Stress Testing – Historical GSPC Drawdown Regimes
-# -----------------------------------------------------------------------------
-def find_gspc_drawdown_periods(start, end, threshold=-0.20):
-    """Identify periods where ^GSPC had a peak-to-trough drawdown exceeding threshold."""
-    df = fetch_ohlcv("^GSPC", start, end)
-    if df.empty:
+def historical_drawdown_periods(benchmark_px, threshold=-0.20):
+    if benchmark_px.empty:
         return pd.DataFrame()
-    wealth = df["Close"] / df["Close"].iloc[0]
-    peak = wealth.cummax()
-    dd = wealth / peak - 1
-    # Find contiguous periods where dd < threshold
-    is_stressed = dd < threshold
-    stressed_groups = (is_stressed != is_stressed.shift()).cumsum()[is_stressed]
-    periods = []
-    for gid, group in dd[is_stressed].groupby(stressed_groups):
-        start_date = group.index.min()
-        end_date = group.index.max()
-        min_dd = group.min()
-        periods.append({"Start": start_date, "End": end_date, "Max DD": min_dd})
-    return pd.DataFrame(periods).sort_values("Max DD")
-
-def build_historical_stress_table(ticker, start, end, min_dd_threshold=-0.20):
-    """Build a table of historical stress periods for ^GSPC and the ticker's return over those windows."""
-    spx_periods = find_gspc_drawdown_periods(start, end, min_dd_threshold)
-    if spx_periods.empty:
+    wealth = benchmark_px / benchmark_px.iloc[0]
+    dd = wealth / wealth.cummax() - 1
+    in_stress = dd < threshold
+    if not in_stress.any():
         return pd.DataFrame()
-    asset = fetch_ohlcv(ticker, start, end)
-    if asset.empty:
-        return pd.DataFrame()
-    asset_returns = asset["Close"].pct_change()
+    groups = (in_stress != in_stress.shift()).cumsum()[in_stress]
     rows = []
-    for _, row in spx_periods.iterrows():
-        mask = (asset_returns.index >= row["Start"]) & (asset_returns.index <= row["End"])
-        if mask.sum() > 1:
-            cumulative = (1 + asset_returns[mask]).prod() - 1
-            rows.append({
-                "Start": row["Start"].strftime("%Y-%m-%d"),
-                "End": row["End"].strftime("%Y-%m-%d"),
-                "GSPC Max DD": fmt_pct(row["Max DD"]),
-                f"{ticker} Cumulative Return": fmt_pct(cumulative),
-                "Days": mask.sum(),
-            })
-    if rows:
-        return pd.DataFrame(rows).sort_values("Start")
-    return pd.DataFrame()
+    for _, g in dd[in_stress].groupby(groups):
+        rows.append({'Start': g.index.min(), 'End': g.index.max(), 'Benchmark Max DD': g.min(), 'Days': len(g)})
+    return pd.DataFrame(rows).sort_values('Benchmark Max DD')
 
-# -----------------------------------------------------------------------------
-# Advanced Risk Analytics Tab Builder
-# -----------------------------------------------------------------------------
-def build_advanced_risk(ticker, benchmark_label, start, end):
-    bench = BENCHMARKS[benchmark_label]
-    asset = add_indicators(fetch_ohlcv(ticker, start, end))
-    benchmark = add_indicators(fetch_ohlcv(bench, start, end))
-
+def advanced_risk(ticker, benchmark_label, start, end, refresh_token):
+    b = BENCHMARKS[benchmark_label]
+    asset = add_features(fetch_one(ticker, start, end, refresh_token))
+    bench = add_features(fetch_one(b, start, end, refresh_token))
     if asset.empty:
-        return empty_state("No Yahoo data", f"{ticker} data unavailable.")
-
-    returns = asset["Return"].dropna()
-    if returns.empty or len(returns) < 126:
-        return empty_state("Insufficient data", "At least 126 daily returns needed for rolling analytics.")
-
-    price = asset["Close"]
-    bench_returns = benchmark["Return"].dropna() if not benchmark.empty else None
-
-    window_var = 252  # 1-year rolling
-    window_nav = 63   # 3 months
-
-    # --- Rolling VaR series for 95% and 99% (all methods) ---
-    var95_hist = compute_rolling_var(returns, window_var, 0.95, 'historical')
-    var99_hist = compute_rolling_var(returns, window_var, 0.99, 'historical')
-    var95_param = compute_rolling_var(returns, window_var, 0.95, 'parametric')
-    var99_param = compute_rolling_var(returns, window_var, 0.99, 'parametric')
-    var95_mc = compute_rolling_var(returns, window_var, 0.95, 'montecarlo')
-    var99_mc = compute_rolling_var(returns, window_var, 0.99, 'montecarlo')
-
-    # --- VaR/NAV ratio series (95% only for clarity) ---
-    var_nav_ratio_hist = compute_var_nav_ratio(price, returns, window_var, window_nav, 0.95, 'historical')
-    var_nav_ratio_param = compute_var_nav_ratio(price, returns, window_var, window_nav, 0.95, 'parametric')
-    var_nav_ratio_mc = compute_var_nav_ratio(price, returns, window_var, window_nav, 0.95, 'montecarlo')
-
-    # --- Rolling Beta ---
-    if bench_returns is not None:
-        beta_series = rolling_beta(returns, bench_returns, window_var)
-    else:
-        beta_series = pd.Series(dtype=float)
-
-    # --- VaR Violation Backtest (last 252 days) ---
-    recent_returns = returns.iloc[-window_var:]
-    backtest = {}
-    backtest_table = []
-    for method, var_ser in [
-        ('Historical 95%', var95_hist.tail(len(recent_returns))),
-        ('Parametric 95%', var95_param.tail(len(recent_returns))),
-        ('Monte Carlo 95%', var95_mc.tail(len(recent_returns))),
-        ('Historical 99%', var99_hist.tail(len(recent_returns))),
-        ('Parametric 99%', var99_param.tail(len(recent_returns))),
-        ('Monte Carlo 99%', var99_mc.tail(len(recent_returns))),
-    ]:
-        aligned = pd.concat([recent_returns, var_ser.shift(1)], axis=1, join='inner').dropna()
-        violations = (aligned.iloc[:, 0] < aligned.iloc[:, 1]).sum()
-        total = len(aligned)
-        backtest_table.append({
-            "Method": method,
-            "Expected Violations": f"{int((1 - (0.95 if '95' in method else 0.99)) * total)}",
-            "Actual Violations": violations,
-            "Ratio": f"{violations/total:.2%}"
-        })
-
-    backtest_df = pd.DataFrame(backtest_table)
-
-    # --- Historical Stress Scenarios Table ---
-    stress_df = build_historical_stress_table(ticker, start, end)
-
-    # Build visualizations
-    fig1 = make_subplots(rows=2, cols=1, vertical_spacing=0.1, subplot_titles=["Rolling VaR 95% (3 methods)", "Rolling VaR 99% (3 methods)"])
-    for series, name, col, row in zip(
-        [var95_hist, var95_param, var95_mc, var99_hist, var99_param, var99_mc],
-        ["Historical 95%", "Parametric 95%", "Monte Carlo 95%", "Historical 99%", "Parametric 99%", "Monte Carlo 99%"],
-        [1,1,1,1,1,1],
-        [1,1,1,2,2,2]
-    ):
-        fig1.add_trace(go.Scatter(x=series.index, y=series*100, name=name, mode='lines',
-                                  hovertemplate="%{y:.4f}%<extra></extra>"), row=row, col=col)
-    fig1.update_yaxes(title_text="VaR (%)", row=1, col=1)
-    fig1.update_yaxes(title_text="VaR (%)", row=2, col=1)
-    fig1 = chart_layout(fig1, f"{ticker} | Rolling VaR Backtest", 800)
-
-    fig2 = make_subplots(rows=1, cols=1, subplot_titles=["VaR / 3-Month NAV Ratio (95%)"])
-    for series, name in zip(
-        [var_nav_ratio_hist, var_nav_ratio_param, var_nav_ratio_mc],
-        ["Historical", "Parametric", "Monte Carlo"]
-    ):
-        fig2.add_trace(go.Scatter(x=series.index, y=series, name=name, mode='lines',
-                                  hovertemplate="%{y:.2f}%<extra></extra>"))
-    fig2.update_yaxes(title_text="Ratio (%)")
-    fig2 = chart_layout(fig2, f"{ticker} | VaR Value vs 3-Month NAV", 600)
-
+        return empty('Advanced risk unavailable', f'Yahoo returned no usable data for {ticker}.')
+    r = asset['Return'].dropna()
+    if len(r) < 126:
+        return empty('Insufficient data', 'At least 126 daily returns are required for advanced rolling risk analytics.')
+    window = min(ADVANCED_RISK_WINDOW, max(126, len(r)//2)) if len(r) < ADVANCED_RISK_WINDOW else ADVANCED_RISK_WINDOW
+    var95_h = rolling_var_series(r, window, .95, 'historical'); var99_h = rolling_var_series(r, window, .99, 'historical')
+    var95_p = rolling_var_series(r, window, .95, 'parametric'); var99_p = rolling_var_series(r, window, .99, 'parametric')
+    var95_m = rolling_var_series(r, window, .95, 'montecarlo'); var99_m = rolling_var_series(r, window, .99, 'montecarlo')
+    ratio_h = var_nav_ratio(asset['Close'], r, window, .95, 'historical')
+    ratio_p = var_nav_ratio(asset['Close'], r, window, .95, 'parametric')
+    ratio_m = var_nav_ratio(asset['Close'], r, window, .95, 'montecarlo')
+    beta = rolling_beta_series(r, bench['Return'].dropna(), window) if not bench.empty else pd.Series(dtype=float)
+    bt_rows = []
+    recent = r.tail(min(252, len(r)))
+    for label, ser, conf in [('Historical 95%', var95_h, .95), ('Parametric 95%', var95_p, .95), ('Monte Carlo 95%', var95_m, .95), ('Historical 99%', var99_h, .99), ('Parametric 99%', var99_p, .99), ('Monte Carlo 99%', var99_m, .99)]:
+        aligned = pd.concat([recent.rename('return'), ser.shift(1).rename('var')], axis=1, join='inner').dropna()
+        n = len(aligned); violations = int((aligned['return'] < aligned['var']).sum()) if n else 0
+        bt_rows.append({'Method': label, 'Expected Violations': round((1-conf)*n, 1), 'Actual Violations': violations, 'Violation Ratio': (violations/n if n else np.nan)})
+    shown_bt = pd.DataFrame(bt_rows); shown_bt['Violation Ratio'] = shown_bt['Violation Ratio'].map(lambda x: pct(x))
+    stress_rows = []
+    if not bench.empty:
+        periods = historical_drawdown_periods(bench['Close'], -0.20)
+        ar = asset['Close'].pct_change().dropna()
+        for _, row in periods.iterrows():
+            mask = (ar.index >= row['Start']) & (ar.index <= row['End'])
+            if mask.sum() > 1:
+                stress_rows.append({'Start': row['Start'].strftime('%Y-%m-%d'), 'End': row['End'].strftime('%Y-%m-%d'), 'Benchmark Max DD': row['Benchmark Max DD'], f'{ticker} Cumulative Return': (1 + ar[mask]).prod() - 1, 'Days': int(mask.sum())})
+    shown_stress = pd.DataFrame(stress_rows)
+    if not shown_stress.empty:
+        shown_stress['Benchmark Max DD'] = shown_stress['Benchmark Max DD'].map(lambda x: pct(x))
+        shown_stress[f'{ticker} Cumulative Return'] = shown_stress[f'{ticker} Cumulative Return'].map(lambda x: pct(x))
+    fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=['Rolling VaR 95%: Historical / Parametric / Monte Carlo', 'Rolling VaR 99%: Historical / Parametric / Monte Carlo'])
+    for ser, name, row in [(var95_h,'Historical 95%',1),(var95_p,'Parametric 95%',1),(var95_m,'Monte Carlo 95%',1),(var99_h,'Historical 99%',2),(var99_p,'Parametric 99%',2),(var99_m,'Monte Carlo 99%',2)]:
+        fig1.add_trace(go.Scatter(x=ser.index, y=ser*100, name=name, mode='lines'), row=row, col=1)
+    fig1.update_yaxes(title='Daily VaR (%)', row=1, col=1); fig1.update_yaxes(title='Daily VaR (%)', row=2, col=1)
+    fig2 = go.Figure()
+    for ser, name in [(ratio_h,'Historical'),(ratio_p,'Parametric'),(ratio_m,'Monte Carlo')]:
+        fig2.add_trace(go.Scatter(x=ser.index, y=ser, name=name, mode='lines'))
+    fig2.update_yaxes(title='VaR / 3M NAV (%)')
     fig3 = go.Figure()
-    if not beta_series.empty:
-        fig3.add_trace(go.Scatter(x=beta_series.index, y=beta_series, name="Rolling Beta to " + benchmark_label,
-                                  mode='lines', hovertemplate="%{y:.3f}<extra></extra>"))
-    fig3.update_yaxes(title_text="Beta")
-    fig3 = chart_layout(fig3, f"{ticker} | Rolling {window_var}-Day Beta vs {benchmark_label}", 500)
+    if not beta.empty:
+        fig3.add_trace(go.Scatter(x=beta.index, y=beta, name=f'Rolling Beta vs {benchmark_label}', mode='lines')); fig3.add_hline(y=1.0, line_dash='dash')
+    fig3.update_yaxes(title='Beta')
+    latest_h_var, latest_h_cvar = historical_var(r, .95), historical_cvar(r, .95)
+    latest_p_var = parametric_var(r, .95)
+    latest_m_var, latest_m_cvar = monte_carlo_tail(r.tail(window), .95)
+    cards = [('Hist VaR 95', pct(latest_h_var), 'red'), ('Hist CVaR 95', pct(latest_h_cvar), 'red'), ('Param VaR 95', pct(latest_p_var), 'amber'), ('MC VaR 95', pct(latest_m_var), 'amber'), ('MC CVaR 95', pct(latest_m_cvar), 'red'), ('Latest Beta', num(beta.dropna().iloc[-1] if beta.dropna().size else np.nan), 'blue'), ('TA Engine', str(asset['Indicator Engine'].iloc[-1]) if 'Indicator Engine' in asset else 'N/A', 'blue'), ('MC Sims', f'{MC_SIMULATIONS:,}', 'green')]
+    return pn.Column(html_note('Advanced risk methodology', f'Historical, parametric-normal and Monte Carlo t-distribution VaR/CVaR. Rolling window: <b>{window}</b> trading days. Monte Carlo is capped by QFA_MC_SIMULATIONS for Render stability.'), kpi_cards(cards), pn.pane.Plotly(layout(fig1, f'{ticker} | Rolling VaR Backtest', 820), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig2, f'{ticker} | VaR / 3-Month NAV Ratio', 560), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Plotly(layout(fig3, f'{ticker} | Rolling Beta vs {benchmark_label}', 500), config={'responsive': True}, sizing_mode='stretch_width'), pn.pane.Markdown('### VaR Violation Backtest'), pn.widgets.Tabulator(shown_bt, height=260, sizing_mode='stretch_width'), pn.pane.Markdown('### Historical Benchmark Drawdown Regimes'), pn.widgets.Tabulator(shown_stress if not shown_stress.empty else pd.DataFrame([{'Message': 'No benchmark drawdown regime below -20% in selected period.'}]), height=300, sizing_mode='stretch_width'), sizing_mode='stretch_width')
 
-    # VaR Backtest table
-    backtest_pane = pn.widgets.Tabulator(backtest_df, height=280, sizing_mode="stretch_width")
-
-    # Stress scenarios table
-    if not stress_df.empty:
-        stress_pane = pn.widgets.Tabulator(stress_df, height=300, sizing_mode="stretch_width")
-    else:
-        stress_pane = pn.pane.HTML("<div class='qfa-note'>No major GSPC drawdown periods found in the selected range.</div>", sizing_mode="stretch_width")
-
-    return pn.Column(
-        pn.pane.HTML(
-            f"""
-            <div class="qfa-note">
-            <b>Advanced Risk Analytics:</b> Rolling VaR/CVaR (Historical, Parametric, Monte Carlo ≥10k simulations).
-            VaR/NAV ratio shows daily VaR as percentage of 3-month average price. Beta vs {benchmark_label}.
-            All data from original Yahoo Finance. VaR backtest checks recent 252 days.
-            </div>
-            """,
-            sizing_mode="stretch_width",
-        ),
-        pn.pane.Plotly(fig1, config={"responsive": True}),
-        pn.pane.Plotly(fig2, config={"responsive": True}),
-        pn.pane.Plotly(fig3, config={"responsive": True}),
-        pn.pane.Markdown("### VaR Backtest (last 252 days)"),
-        backtest_pane,
-        pn.pane.Markdown("### Historical Stress Scenarios (GSPC drawdowns > 20%)"),
-        stress_pane,
-        sizing_mode="stretch_width",
-    )
-
-# =============================================================================
-# Existing Build Blocks (unchanged except new tab integration)
-# =============================================================================
-def build_kpi(ticker, benchmark_label, start, end):
-    bench = BENCHMARKS[benchmark_label]
-    asset = add_indicators(fetch_ohlcv(ticker, start, end))
-    benchmark = add_indicators(fetch_ohlcv(bench, start, end))
-
+# -----------------------------------------------------------------------------
+# Render blocks
+# -----------------------------------------------------------------------------
+def executive(ticker, benchmark_label, start, end, refresh_token):
+    asset = add_features(fetch_one(ticker, start, end, refresh_token))
+    bench = add_features(fetch_one(BENCHMARKS[benchmark_label], start, end, refresh_token))
     if asset.empty:
-        return empty_state("No Yahoo data", f"{ticker} could not be downloaded from Yahoo Finance for the selected period.")
+        return empty('Yahoo data unavailable', f'{ticker} could not be downloaded. Retry, shorten universe size, or click Refresh Data.')
+    m = metrics(asset['Return'])
+    a = active_metrics(asset['Return'], bench['Return']) if not bench.empty else {}
+    cards = [
+        ('Annual Return', pct(m.get('Ann Return')), 'green' if m.get('Ann Return',0) > 0 else 'red'),
+        ('Annual Volatility', pct(m.get('Ann Vol')), 'amber'),
+        ('Sharpe Ratio', num(m.get('Sharpe')), 'green' if m.get('Sharpe',0) > 1 else 'amber'),
+        ('Max Drawdown', pct(m.get('Max Drawdown')), 'red'),
+        ('CVaR 95', pct(m.get('CVaR 95')), 'red'),
+        ('Tracking Error', pct(a.get('Tracking Error')), 'blue'),
+        ('Information Ratio', num(a.get('Information Ratio')), 'green' if a.get('Information Ratio',0) > 0 else 'amber'),
+        ('Beta vs Benchmark', num(a.get('Beta')), 'blue'),
+    ]
+    return pn.Column(
+        html_note('Reactive engine status', f'Instrument: <b>{ticker}</b> — {name_for(ticker)} | Benchmark: <b>{benchmark_label}</b> | Observations: <b>{m.get("Obs",0)}</b> | TA Engine: <b>{asset["Indicator Engine"].iloc[-1] if "Indicator Engine" in asset else "N/A"}</b> | Cache TTL: <b>{CACHE_TTL_SECONDS}s</b> | Refresh token: <b>{refresh_token}</b>'),
+        kpi_cards(cards),
+        sizing_mode='stretch_width'
+    )
 
-    metrics = risk_metrics(asset["Return"], RISK_FREE_RATE)
-    act = {}
-    if not benchmark.empty:
-        act = active_metrics(asset["Return"], benchmark["Return"])
-
-    engine = str(asset["Indicator Engine"].iloc[-1]) if "Indicator Engine" in asset.columns else ("TA-Lib" if TALIB_AVAILABLE else "Formula fallback")
-    return make_kpi_cards(ticker, benchmark_label, metrics, act, engine)
-
-
-def build_price_chart(ticker, start, end):
-    df = add_indicators(fetch_ohlcv(ticker, start, end))
+def technical_chart(ticker, start, end, refresh_token):
+    df = add_features(fetch_one(ticker, start, end, refresh_token))
     if df.empty:
-        return empty_state("No Yahoo data", f"No original Yahoo data was available for {ticker}.")
+        return empty('No price data', f'Yahoo returned no data for {ticker}.')
+    fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=.038,
+                        row_heights=[.46,.13,.16,.13,.12], subplot_titles=['OHLC + MA + Bollinger Bands','RSI 14','MACD','Stochastic Oscillator','ATR / EWMA Risk Signal'])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='OHLC'), row=1, col=1)
+    for col in ['MA50','MA200','BB Upper','BB Mid','BB Lower']:
+        fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, mode='lines'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', mode='lines'), row=2, col=1)
+    fig.add_hline(y=70, row=2, col=1, line_dash='dash'); fig.add_hline(y=30, row=2, col=1, line_dash='dash')
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', mode='lines'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD Signal'], name='Signal', mode='lines'), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['MACD Hist'], name='Histogram', opacity=.45), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Stoch K'], name='Stoch K', mode='lines'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Stoch D'], name='Stoch D', mode='lines'), row=4, col=1)
+    fig.add_hline(y=80, row=4, col=1, line_dash='dash'); fig.add_hline(y=20, row=4, col=1, line_dash='dash')
+    fig.add_trace(go.Scatter(x=df.index, y=df['ATR'], name='ATR', mode='lines'), row=5, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EWMA Risk Signal'], name='EWMA Risk Signal', mode='lines'), row=5, col=1)
+    fig.add_hline(y=1.0, row=5, col=1, line_dash='dash')
+    return pn.pane.Plotly(layout(fig, f'{ticker} | Institutional TA-Lib Technical Dashboard', 1060), config={'responsive': True}, sizing_mode='stretch_width')
 
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.045,
-        row_heights=[0.50, 0.17, 0.18, 0.15],
-        subplot_titles=["OHLC + Bollinger + MA50/MA200", "RSI 14", "MACD", "Stochastic"],
-    )
-
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-            name="OHLC", increasing_line_color="#166534", decreasing_line_color="#991b1b",
-            hoverinfo="x+y+name",
-        ),
-        row=1, col=1,
-    )
-
-    for col, name, dash, width in [
-        ("BB Upper", "BB Upper", "dash", 1.1),
-        ("BB Mid", "BB Mid", "dot", 1.1),
-        ("BB Lower", "BB Lower", "dash", 1.1),
-        ("MA50", "MA50", "solid", 1.7),
-        ("MA200", "MA200", "solid", 2.0),
-    ]:
-        if col in df.columns:
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df[col], name=name, mode="lines",
-                           line=dict(dash=dash, width=width),
-                           hovertemplate="%{y:.4f}<extra></extra>"),
-                row=1, col=1,
-            )
-
-    fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI", mode="lines",
-                             hovertemplate="%{y:.2f}<extra></extra>"), row=2, col=1)
-    fig.add_hline(y=70, row=2, col=1, line_dash="dash", line_color="#64748b")
-    fig.add_hline(y=30, row=2, col=1, line_dash="dash", line_color="#64748b")
-    fig.update_yaxes(range=[0, 100], row=2, col=1)
-
-    fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", mode="lines",
-                             hovertemplate="%{y:.4f}<extra></extra>"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["MACD Signal"], name="Signal", mode="lines",
-                             hovertemplate="%{y:.4f}<extra></extra>"), row=3, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df["MACD Hist"], name="Histogram", opacity=.42,
-                         hovertemplate="%{y:.4f}<extra></extra>"), row=3, col=1)
-
-    fig.add_trace(go.Scatter(x=df.index, y=df["Stoch K"], name="Stoch K", mode="lines",
-                             hovertemplate="%{y:.2f}<extra></extra>"), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Stoch D"], name="Stoch D", mode="lines",
-                             hovertemplate="%{y:.2f}<extra></extra>"), row=4, col=1)
-    fig.add_hline(y=80, row=4, col=1, line_dash="dash", line_color="#64748b")
-    fig.add_hline(y=20, row=4, col=1, line_dash="dash", line_color="#64748b")
-
-    return pn.pane.Plotly(chart_layout(fig, f"{ticker} | TA-Lib Technical Dashboard", 920), config={"responsive": True})
-
-
-def build_risk_chart(ticker, start, end):
-    df = add_indicators(fetch_ohlcv(ticker, start, end))
+def risk_chart(ticker, start, end, refresh_token):
+    df = add_features(fetch_one(ticker, start, end, refresh_token))
     if df.empty:
-        return empty_state("No Yahoo data", f"No original Yahoo data was available for {ticker}.")
+        return empty('Risk chart unavailable', 'No usable price data.')
+    r = df['Return'].dropna()
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=False, vertical_spacing=.08,
+                        subplot_titles=['Cumulative Return','Rolling Volatility 21D / 63D','Drawdown','Daily Return Distribution'])
+    fig.add_trace(go.Scatter(x=df.index, y=df['CumReturn']*100, name='Cumulative Return %', mode='lines'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Vol21']*100, name='Vol 21D %', mode='lines'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Vol63']*100, name='Vol 63D %', mode='lines'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Drawdown']*100, name='Drawdown %', fill='tozeroy', mode='lines'), row=3, col=1)
+    fig.add_trace(go.Histogram(x=r*100, nbinsx=70, name='Daily Returns %'), row=4, col=1)
+    return pn.pane.Plotly(layout(fig, f'{ticker} | Risk Diagnostics', 900), config={'responsive': True}, sizing_mode='stretch_width')
 
-    r = df["Return"].dropna()
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.055,
-        subplot_titles=["Cumulative Return", "Rolling Volatility", "Drawdown", "Daily Return Distribution"],
-    )
-    fig.add_trace(go.Scatter(x=df.index, y=df["Cumulative Return"]*100, name="Cumulative Return %",
-                             mode="lines", hovertemplate="%{y:.2f}%<extra></extra>"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Vol21"]*100, name="Vol 21D %",
-                             mode="lines", hovertemplate="%{y:.2f}%<extra></extra>"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Vol63"]*100, name="Vol 63D %",
-                             mode="lines", hovertemplate="%{y:.2f}%<extra></extra>"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Drawdown"]*100, name="Drawdown %",
-                             mode="lines", fill="tozeroy", hovertemplate="%{y:.2f}%<extra></extra>"), row=3, col=1)
-    fig.add_trace(go.Histogram(x=r*100, nbinsx=70, name="Daily Returns %",
-                               hovertemplate="%{x:.2f}%<extra></extra>"), row=4, col=1)
-    return pn.pane.Plotly(chart_layout(fig, f"{ticker} | Hedge Fund Risk Diagnostics", 880), config={"responsive": True})
-
-
-def build_benchmark_relative(ticker, benchmark_label, start, end):
-    bench = BENCHMARKS[benchmark_label]
-    asset = fetch_ohlcv(ticker, start, end)
-    benchmark = fetch_ohlcv(bench, start, end)
-
-    if asset.empty or benchmark.empty:
-        return empty_state("Benchmark relative data unavailable", f"Yahoo data missing for {ticker} or {bench}.")
-
-    joined = pd.concat([asset["Close"].rename(ticker), benchmark["Close"].rename(bench)], axis=1).dropna()
-    if len(joined) < MIN_OBS:
-        return empty_state("Insufficient matched data", f"Matched Yahoo data count is below {MIN_OBS} observations.")
-
-    ret = joined.pct_change().dropna()
+def relative_chart(ticker, benchmark_label, start, end, refresh_token):
+    b = BENCHMARKS[benchmark_label]
+    px = fetch_matrix([ticker, b], start, end, refresh_token)
+    if px.empty or ticker not in px or b not in px:
+        return empty('Benchmark-relative panel unavailable', f'Missing matched Yahoo data for {ticker} or {b}.')
+    ret = px.pct_change().dropna()
     cum = (1 + ret).cumprod() - 1
-    active = ret[ticker] - ret[bench]
+    active = ret[ticker] - ret[b]
     active_cum = (1 + active).cumprod() - 1
-    rolling_te = active.rolling(63).std() * np.sqrt(TRADING_DAYS)
-    rolling_ir = (active.rolling(63).mean() * TRADING_DAYS) / rolling_te
+    te = active.rolling(63).std() * math.sqrt(TRADING_DAYS)
+    ir = active.rolling(63).mean() * TRADING_DAYS / te
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.055,
+                        subplot_titles=['Cumulative Return vs Benchmark','Active Cumulative Return','Rolling Tracking Error','Rolling Information Ratio'])
+    fig.add_trace(go.Scatter(x=cum.index, y=cum[ticker]*100, name=ticker, mode='lines'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=cum.index, y=cum[b]*100, name=benchmark_label, mode='lines'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=active_cum.index, y=active_cum*100, name='Active Return %', mode='lines'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=te.index, y=te*100, name='Tracking Error %', mode='lines'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=ir.index, y=ir, name='Information Ratio', mode='lines'), row=4, col=1)
+    fig.add_hline(y=0, row=2, col=1, line_dash='dash'); fig.add_hline(y=0, row=4, col=1, line_dash='dash')
+    return pn.pane.Plotly(layout(fig, f'{ticker} vs {benchmark_label} | Benchmark Relative Analytics', 900), config={'responsive': True}, sizing_mode='stretch_width')
 
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.055,
-        subplot_titles=["Cumulative Return Comparison", "Active Cumulative Return", "Rolling Tracking Error", "Rolling Information Ratio"],
-    )
-    fig.add_trace(go.Scatter(x=cum.index, y=cum[ticker]*100, name=ticker, mode="lines",
-                             hovertemplate="%{y:.2f}%<extra></extra>"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=cum.index, y=cum[bench]*100, name=benchmark_label, mode="lines",
-                             hovertemplate="%{y:.2f}%<extra></extra>"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=active_cum.index, y=active_cum*100, name="Active Return", mode="lines",
-                             hovertemplate="%{y:.2f}%<extra></extra>"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=rolling_te.index, y=rolling_te*100, name="Rolling TE 63D", mode="lines",
-                             hovertemplate="%{y:.2f}%<extra></extra>"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=rolling_ir.index, y=rolling_ir, name="Rolling IR 63D", mode="lines",
-                             hovertemplate="%{y:.2f}<extra></extra>"), row=4, col=1)
-    fig.add_hline(y=0, row=2, col=1, line_dash="dash", line_color="#64748b")
-    fig.add_hline(y=0, row=4, col=1, line_dash="dash", line_color="#64748b")
-    return pn.pane.Plotly(chart_layout(fig, f"{ticker} vs {benchmark_label} | Benchmark Relative Analytics", 900), config={"responsive": True})
-
-
-def build_universe_board(asset_class, region, start, end):
+def universe_board(asset_class, region, start, end, refresh_token):
     tickers = get_tickers(asset_class, region)
-    prices = fetch_price_matrix(tickers, start, end)
-    if prices.empty:
-        return empty_state("Universe unavailable", "No matched original Yahoo data was available for the selected universe.")
-
-    returns = prices.pct_change().dropna()
+    px = fetch_matrix(tickers, start, end, refresh_token)
+    if px.empty:
+        return empty('Universe unavailable', 'Yahoo returned no matched data for the selected universe.')
+    ret = px.pct_change().dropna()
     rows = []
-    for t in returns.columns:
-        m = risk_metrics(returns[t], RISK_FREE_RATE)
-        total_return = prices[t].iloc[-1] / prices[t].iloc[0] - 1
-        rows.append({
-            "Ticker": t,
-            "Name": get_name(t),
-            "Total Return": total_return,
-            "Ann Return": m["Ann Return"],
-            "Ann Vol": m["Ann Vol"],
-            "Sharpe": m["Sharpe"],
-            "Max DD": m["Max Drawdown"],
-            "CVaR 95": m["CVaR 95"],
-        })
-
-    board = pd.DataFrame(rows).sort_values("Sharpe", ascending=False)
-
-    fig = make_subplots(
-        rows=2, cols=1, vertical_spacing=0.13,
-        subplot_titles=["Sharpe Ranking", "Annual Return vs Annual Volatility Map"],
-    )
-    fig.add_trace(go.Bar(x=board["Ticker"], y=board["Sharpe"], name="Sharpe",
-                         hovertemplate="%{x}: %{y:.2f}<extra></extra>"), row=1, col=1)
-    fig.add_trace(
-        go.Scatter(
-            x=board["Ann Vol"]*100, y=board["Ann Return"]*100,
-            mode="markers+text", text=board["Ticker"], textposition="top center",
-            marker=dict(size=np.clip((board["Sharpe"].fillna(0).abs()+0.6)*14, 9, 32)),
-            name="Risk/Return",
-            hovertemplate="Vol: %{x:.2f}%<br>Return: %{y:.2f}%<extra></extra>",
-        ),
-        row=2, col=1,
-    )
-    fig.update_xaxes(title="Ticker", row=1, col=1)
-    fig.update_xaxes(title="Annualized Volatility (%)", row=2, col=1)
-    fig.update_yaxes(title="Sharpe", row=1, col=1)
-    fig.update_yaxes(title="Annualized Return (%)", row=2, col=1)
-
-    table_df = board.copy()
-    for col in ["Total Return", "Ann Return", "Ann Vol", "Max DD", "CVaR 95"]:
-        table_df[col] = table_df[col].map(lambda x: fmt_pct(x))
-    table_df["Sharpe"] = table_df["Sharpe"].map(lambda x: fmt_num(x, 2))
-
+    for t in ret.columns:
+        m = metrics(ret[t])
+        rows.append({'Ticker': t, 'Name': name_for(t), 'Ann Return': m.get('Ann Return'), 'Ann Vol': m.get('Ann Vol'), 'Sharpe': m.get('Sharpe'), 'Max DD': m.get('Max Drawdown'), 'CVaR 95': m.get('CVaR 95')})
+    board = pd.DataFrame(rows).sort_values('Sharpe', ascending=False)
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=.14, subplot_titles=['Sharpe Ranking','Annual Return vs Annual Volatility'])
+    fig.add_trace(go.Bar(x=board['Ticker'], y=board['Sharpe'], name='Sharpe'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=board['Ann Vol']*100, y=board['Ann Return']*100, text=board['Ticker'], mode='markers+text', textposition='top center', name='Risk/Return'), row=2, col=1)
+    shown = board.copy()
+    for c in ['Ann Return','Ann Vol','Max DD','CVaR 95']:
+        shown[c] = shown[c].map(lambda x: pct(x))
+    shown['Sharpe'] = shown['Sharpe'].map(lambda x: num(x))
     return pn.Column(
-        pn.pane.Plotly(chart_layout(fig, f"{asset_class} | {region} | Universe Board", 820), config={"responsive": True}),
-        pn.widgets.Tabulator(table_df, height=360, pagination="remote", page_size=12, sizing_mode="stretch_width"),
-        sizing_mode="stretch_width",
+        pn.pane.Plotly(layout(fig, f'{asset_class} | {region} | Universe Board', 800), config={'responsive': True}, sizing_mode='stretch_width'),
+        pn.widgets.Tabulator(shown, height=380, pagination='remote', page_size=12, sizing_mode='stretch_width'),
+        sizing_mode='stretch_width'
     )
 
+def optimize_weights(ret):
+    cols = list(ret.columns)
+    if len(cols) < 2:
+        return pd.Series(1.0, index=cols)
+    mu = ret.mean().values * TRADING_DAYS
+    if SKLEARN_AVAILABLE:
+        cov = LedoitWolf().fit(ret.fillna(0).values).covariance_ * TRADING_DAYS
+    else:
+        cov = ret.cov().values * TRADING_DAYS
+    n = len(cols)
+    def neg_sharpe(w):
+        p_ret = float(w @ mu)
+        p_vol = float(np.sqrt(w @ cov @ w))
+        return -((p_ret - RF) / p_vol) if p_vol > 0 else 1e6
+    cons = ({'type':'eq', 'fun': lambda w: np.sum(w)-1},)
+    bounds = [(0, .40)] * n
+    x0 = np.ones(n) / n
+    if SCIPY_AVAILABLE:
+        res = minimize(neg_sharpe, x0, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 500})
+        w = res.x if res.success else x0
+    else:
+        w = x0
+    return pd.Series(np.maximum(w,0), index=cols).pipe(lambda s: s / s.sum())
 
-def build_optimizer(asset_class, region, start, end):
-    tickers = get_tickers(asset_class, region)
-    prices = fetch_price_matrix(tickers, start, end)
+def optimizer(asset_class, region, start, end, refresh_token):
+    px = fetch_matrix(get_tickers(asset_class, region), start, end, refresh_token)
+    if px.empty or px.shape[1] < 2:
+        return empty('Optimizer unavailable', 'At least two assets with matched Yahoo history are required.')
+    ret = px.pct_change().dropna()
+    w = optimize_weights(ret).sort_values(ascending=False)
+    port = ret[w.index] @ w
+    m = metrics(port)
+    fig = go.Figure(go.Bar(x=w.index, y=w.values*100, text=[f'{v*100:.1f}%' for v in w.values], textposition='outside', name='Weight %'))
+    return pn.Column(
+        kpi_cards([('Optimized Ann Return', pct(m.get('Ann Return')), 'green'), ('Optimized Volatility', pct(m.get('Ann Vol')), 'amber'), ('Optimized Sharpe', num(m.get('Sharpe')), 'green'), ('Optimized Max DD', pct(m.get('Max Drawdown')), 'red')]),
+        pn.pane.Plotly(layout(fig, f'{asset_class} | {region} | Long-only Max Sharpe Weights', 620), config={'responsive': True}, sizing_mode='stretch_width'),
+        html_note('Optimization policy', 'Long-only, max 40% single-asset cap, Ledoit-Wolf covariance when sklearn is available. Falls back safely when optimizer or covariance estimation fails.'),
+        sizing_mode='stretch_width'
+    )
 
-    if prices.empty or prices.shape[1] < 3:
-        return empty_state("Optimizer unavailable", "At least 3 instruments with matched Yahoo data are required.")
+def stress(asset_class, region, start, end, family, min_severity, refresh_token):
+    px = fetch_matrix(get_tickers(asset_class, region), start, end, refresh_token)
+    if px.empty:
+        return empty('Stress testing unavailable', 'No matched universe data.')
+    ret = px.pct_change().dropna()
+    vol = ret.std() * math.sqrt(TRADING_DAYS)
+    universe = ret.mean(axis=1)
+    rows = []
+    scenarios = STRESS_SCENARIOS if family == 'All' else STRESS_SCENARIOS[STRESS_SCENARIOS['Family'].eq(family)]
+    for _, s in scenarios.iterrows():
+        for t in ret.columns:
+            beta = ret[t].corr(universe)
+            beta = 1.0 if not np.isfinite(beta) else beta
+            impact = s['Shock'] * beta
+            sev = abs(impact) / max(float(vol[t]), 1e-9) * s['Severity Multiplier']
+            if sev >= min_severity:
+                rows.append({'Family': s['Family'], 'Scenario': s['Scenario'], 'Ticker': t, 'Name': name_for(t), 'Estimated Impact': impact, 'Volatility': vol[t], 'Severity Score': sev})
+    table = pd.DataFrame(rows).sort_values('Severity Score', ascending=False) if rows else pd.DataFrame(columns=['Family','Scenario','Ticker','Name','Estimated Impact','Volatility','Severity Score'])
+    worst = table['Estimated Impact'].min() if not table.empty else np.nan
+    avg_sev = table['Severity Score'].mean() if not table.empty else np.nan
+    cards = [('Worst Impact', pct(worst), 'red'), ('Average Severity', num(avg_sev), 'amber'), ('Scenario Rows', str(len(table)), 'blue'), ('Assets Covered', str(ret.shape[1]), 'green')]
+    shown = table.copy()
+    if not shown.empty:
+        shown['Estimated Impact'] = shown['Estimated Impact'].map(lambda x: pct(x))
+        shown['Volatility'] = shown['Volatility'].map(lambda x: pct(x))
+        shown['Severity Score'] = shown['Severity Score'].map(lambda x: num(x))
+    return pn.Column(kpi_cards(cards), html_note('Stress methodology', 'Deterministic sensitivity stress based on matched Yahoo returns, universe beta and annualized volatility. No synthetic historical price data is generated.'), pn.widgets.Tabulator(shown, height=560, pagination='remote', page_size=20, sizing_mode='stretch_width'), sizing_mode='stretch_width')
 
-    if not PYPFOPT_AVAILABLE:
-        return empty_state("PyPortfolioOpt unavailable", "PyPortfolioOpt is not installed.")
-
-    try:
-        mu = expected_returns.mean_historical_return(prices, frequency=TRADING_DAYS)
-        S = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
-
-        ef = EfficientFrontier(mu, S)
-        w_sharpe = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
-        clean_sharpe = ef.clean_weights()
-        ret_s, vol_s, sharpe_s = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE)
-
-        ef2 = EfficientFrontier(mu, S)
-        w_minvol = ef2.min_volatility()
-        clean_minvol = ef2.clean_weights()
-        ret_m, vol_m, sharpe_m = ef2.portfolio_performance(risk_free_rate=RISK_FREE_RATE)
-
-        weights_df = pd.DataFrame({
-            "Max Sharpe": pd.Series(clean_sharpe),
-            "Min Volatility": pd.Series(clean_minvol),
-        }).fillna(0)
-        weights_df = weights_df[(weights_df.abs().sum(axis=1) > 0.0001)].copy()
-
-        summary = pd.DataFrame([
-            {"Strategy": "Max Sharpe", "Expected Return": fmt_pct(ret_s), "Volatility": fmt_pct(vol_s), "Sharpe": fmt_num(sharpe_s, 2)},
-            {"Strategy": "Min Volatility", "Expected Return": fmt_pct(ret_m), "Volatility": fmt_pct(vol_m), "Sharpe": fmt_num(sharpe_m, 2)},
-        ])
-
-        fig = go.Figure()
-        for col in weights_df.columns:
-            fig.add_trace(go.Bar(x=weights_df.index, y=weights_df[col]*100, name=col,
-                                 hovertemplate="%{x}: %{y:.2f}%<extra></extra>"))
-        fig.update_layout(barmode="group", yaxis_title="Weight (%)")
-        fig = chart_layout(fig, f"{asset_class} | {region} | PyPortfolioOpt Weights", 620)
-
-        return pn.Column(
-            pn.pane.HTML(f"""<div class="qfa-note"><b>Optimizer engine:</b> PyPortfolioOpt | Covariance: Ledoit-Wolf shrinkage |
-            Risk-free rate: {RISK_FREE_RATE:.2%}.<br>The optimizer uses only original matched Yahoo close prices. No synthetic price data.</div>""", sizing_mode="stretch_width"),
-            pn.widgets.Tabulator(summary, height=150, sizing_mode="stretch_width"),
-            pn.pane.Plotly(fig, config={"responsive": True}),
-            pn.widgets.Tabulator((weights_df*100).round(2), height=360, pagination="remote", page_size=15, sizing_mode="stretch_width"),
-            sizing_mode="stretch_width",
-        )
-
-    except Exception as e:
-        return empty_state("Optimizer failed", f"{type(e).__name__}: {str(e)}")
-
-
-def build_tearsheet(ticker, benchmark_label, start, end):
+def tearsheet(ticker, benchmark_label, start, end, refresh_token):
     if not QUANTSTATS_AVAILABLE:
-        return empty_state("QuantStats unavailable", "QuantStats is not installed.")
-    bench = BENCHMARKS[benchmark_label]
-    asset = fetch_ohlcv(ticker, start, end)
-    benchmark = fetch_ohlcv(bench, start, end)
-    if asset.empty or benchmark.empty:
-        return empty_state("Tearsheet unavailable", f"Yahoo data missing for {ticker} or {benchmark_label}.")
-    returns = asset["Close"].pct_change().rename(ticker)
-    bench_returns = benchmark["Close"].pct_change().rename(bench)
-    matched = pd.concat([returns, bench_returns], axis=1).dropna()
-    if len(matched) < MIN_OBS:
-        return empty_state("Insufficient matched observations", f"QuantStats requires more matched observations. Current count: {len(matched)}.")
-    file_name = f"tearsheet_{ticker.replace('^','IDX')}_vs_{bench.replace('^','IDX')}.html"
-    output_path = OUTPUT_DIR / file_name
+        return empty('Tearsheet unavailable', 'quantstats is not installed in this environment.')
+    b = BENCHMARKS[benchmark_label]
+    px = fetch_matrix([ticker, b], start, end, refresh_token)
+    if px.empty or ticker not in px or b not in px:
+        return empty('Tearsheet unavailable', 'Missing matched asset/benchmark data.')
+    ret = px.pct_change().dropna()
+    path = OUTPUT_DIR / f'tearsheet_{ticker.replace("^","IDX")}_vs_{b.replace("^","IDX")}.html'
     try:
-        qs.reports.html(
-            matched[ticker],
-            benchmark=matched[bench],
-            rf=RISK_FREE_RATE,
-            output=str(output_path),
-            title=f"{ticker} vs {benchmark_label} | QFA Hedge Fund Tearsheet",
-            compounded=True,
-        )
-        html = output_path.read_text(encoding="utf-8", errors="ignore")
-        header = f"""
-        <div class="qfa-note">
-        <b>Tearsheet generated dynamically.</b><br>
-        Instrument: <b>{ticker}</b> | Benchmark: <b>{benchmark_label}</b> ({bench}) |
-        RF: <b>{RISK_FREE_RATE:.2%}</b> | Matched observations: <b>{len(matched)}</b><br>
-        S&P 500 benchmark uses <b>^GSPC</b>; SPY is not hard-coded as benchmark.
-        </div>
-        """
-        return pn.Column(
-            pn.pane.HTML(header, sizing_mode="stretch_width"),
-            pn.pane.HTML(html, height=1050, sizing_mode="stretch_width"),
-            sizing_mode="stretch_width",
-        )
+        qs.reports.html(ret[ticker], benchmark=ret[b], rf=RF, output=str(path), title=f'{ticker} vs {benchmark_label}', compounded=True)
+        return pn.Column(html_note('Generated tearsheet', f'Instrument: <b>{ticker}</b> | Benchmark: <b>{benchmark_label}</b> | RF: <b>{RF:.2%}</b>'), pn.pane.HTML(path.read_text(encoding='utf-8', errors='ignore'), height=1050, sizing_mode='stretch_width'), sizing_mode='stretch_width')
     except Exception as e:
-        return empty_state("QuantStats generation failed", f"{type(e).__name__}: {str(e)}")
-
-
-def build_stress(asset_class, region, start, end):
-    tickers = get_tickers(asset_class, region)
-    prices = fetch_price_matrix(tickers, start, end)
-    if prices.empty:
-        return empty_state("Stress panel unavailable", "No matched Yahoo data for selected universe.")
-    returns = prices.pct_change().dropna()
-    vol = returns.std() * np.sqrt(TRADING_DAYS)
-    rows = []
-    for scenario, shock in STRESS_SCENARIOS.items():
-        for ticker in returns.columns:
-            beta_to_universe = returns[ticker].corr(returns.mean(axis=1))
-            beta_to_universe = 1.0 if pd.isna(beta_to_universe) else beta_to_universe
-            impact = shock * beta_to_universe
-            severity = abs(impact) / max(vol[ticker], 1e-9)
-            rows.append({
-                "Scenario": scenario,
-                "Ticker": ticker,
-                "Name": get_name(ticker),
-                "Estimated Impact": fmt_pct(impact),
-                "Volatility": fmt_pct(vol[ticker]),
-                "Severity Score": round(severity, 2),
-            })
-    table = pd.DataFrame(rows).sort_values("Severity Score", ascending=False)
-    return pn.Column(
-        pn.pane.HTML("""<div class="qfa-note">Scenario engine is a deterministic sensitivity panel based on matched Yahoo returns.
-        It does not create synthetic price history.</div>""", sizing_mode="stretch_width"),
-        pn.widgets.Tabulator(table, height=560, pagination="remote", page_size=20, sizing_mode="stretch_width"),
-        sizing_mode="stretch_width",
-    )
-
+        return empty('Tearsheet generation failed', f'{type(e).__name__}: {e}')
 
 # -----------------------------------------------------------------------------
-# Batch Report Button (unchanged)
-# -----------------------------------------------------------------------------
-def generate_selected_report(ticker, benchmark_label, start, end):
-    try:
-        component = build_tearsheet(ticker, benchmark_label, start, end)
-        path = OUTPUT_DIR / f"QFA_Selected_Report_{ticker.replace('^','IDX')}_{BENCHMARKS[benchmark_label].replace('^','IDX')}.html"
-        wrapper = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <title>QFA Selected Report - {ticker}</title>
-        {css()}
-        </head>
-        <body style="background:#f8fafc;padding:22px;font-family:{FONT_STACK};">
-        <div class="qfa-header">
-            <div class="qfa-title">QFA Selected ETF Report</div>
-            <div class="qfa-subtitle">Instrument: {ticker} | Benchmark: {benchmark_label} | RF: {RISK_FREE_RATE:.2%}</div>
-        </div>
-        <div class="qfa-note">Full interactive dashboard remains in the Panel app. This file records the selected report trigger.</div>
-        </body>
-        </html>
-        """
-        path.write_text(wrapper, encoding="utf-8")
-        return f"Generated: {path}"
-    except Exception as e:
-        return f"Report generation failed: {type(e).__name__}: {str(e)}"
-
-
-# -----------------------------------------------------------------------------
-# App Factory: pure pn.widgets + pn.bind
+# App factory
 # -----------------------------------------------------------------------------
 def make_app():
-    default_asset = "Equity ETF"
+    default_asset = list(UNIVERSE.keys())[0]
     default_region = get_regions(default_asset)[0]
     default_ticker = get_tickers(default_asset, default_region)[0]
 
-    asset_class = pn.widgets.Select(name="Asset Class", options=list(UNIVERSE.keys()), value=default_asset)
-    region = pn.widgets.Select(name="Region", options=get_regions(default_asset), value=default_region)
-    ticker = pn.widgets.Select(name="Instrument", options=get_tickers(default_asset, default_region), value=default_ticker)
-    benchmark = pn.widgets.Select(name="Benchmark", options=list(BENCHMARKS.keys()), value="S&P 500 Index")
-
-    start_date = pn.widgets.DatePicker(name="Start Date", value=datetime(2018, 1, 1))
-    end_date = pn.widgets.DatePicker(name="End Date", value=datetime.now())
-
-    report_button = pn.widgets.Button(name="Generate Selected ETF HTML Report", button_type="primary")
-    report_status = pn.pane.Markdown("")
+    asset_class = pn.widgets.Select(name='Asset Class', options=list(UNIVERSE.keys()), value=default_asset)
+    region = pn.widgets.Select(name='Region', options=get_regions(default_asset), value=default_region)
+    ticker = pn.widgets.Select(name='Instrument', options=get_tickers(default_asset, default_region), value=default_ticker)
+    benchmark = pn.widgets.Select(name='Benchmark', options=list(BENCHMARKS.keys()), value='S&P 500 Index (^GSPC)')
+    start = pn.widgets.DatePicker(name='Start Date', value=datetime(2019,1,1))
+    end = pn.widgets.DatePicker(name='End Date', value=datetime.now())
+    family = pn.widgets.Select(name='Stress Family', options=['All'] + sorted(STRESS_SCENARIOS['Family'].unique().tolist()), value='All')
+    min_severity = pn.widgets.FloatSlider(name='Minimum Severity Threshold', start=0, end=3, step=.1, value=0)
+    refresh = pn.widgets.IntInput(name='Refresh Token', value=0, visible=False)
+    refresh_btn = pn.widgets.Button(name='Refresh Data / Clear Stale Cache', button_type='primary')
 
     def update_regions(event=None):
-        regions = get_regions(asset_class.value)
-        region.options = regions
-        region.value = regions[0] if regions else None
-
+        opts = get_regions(asset_class.value)
+        region.options = opts
+        region.value = opts[0]
     def update_tickers(event=None):
-        tickers = get_tickers(asset_class.value, region.value)
-        ticker.options = tickers
-        ticker.value = tickers[0] if tickers else None
-
-    asset_class.param.watch(lambda e: (update_regions(e), update_tickers(e)), "value")
-    region.param.watch(update_tickers, "value")
-
-    def on_report_click(event):
-        report_status.object = "Generating selected report..."
-        msg = generate_selected_report(ticker.value, benchmark.value, start_date.value, end_date.value)
-        report_status.object = msg
-
-    report_button.on_click(on_report_click)
+        opts = get_tickers(asset_class.value, region.value)
+        ticker.options = opts
+        ticker.value = opts[0]
+    asset_class.param.watch(lambda e: (update_regions(e), update_tickers(e)), 'value')
+    region.param.watch(update_tickers, 'value')
+    refresh_btn.on_click(lambda e: setattr(refresh, 'value', refresh.value + 1))
 
     sidebar = pn.Column(
-        pn.pane.HTML(
-            f"""
-            <div style="padding:8px 0 12px 0;">
-                <div style="font-size:25px;font-weight:850;color:#0f172a;">QFA Hedge Fund</div>
-                <div style="font-size:13px;color:#64748b;line-height:1.45;">
-                    Live reactive dashboard powered by Yahoo Finance, QuantStats and PyPortfolioOpt.
-                </div>
-            </div>
-            """,
-            sizing_mode="stretch_width",
-        ),
-        pn.pane.Markdown("### Investment Universe"),
-        asset_class,
-        region,
-        ticker,
-        pn.pane.Markdown("### Benchmark & Period"),
-        benchmark,
-        start_date,
-        end_date,
-        pn.Spacer(height=8),
-        report_button,
-        report_status,
-        pn.pane.HTML(
-            f"""
-            <div class="qfa-note">
-                {status_badge("TA-Lib Active", TALIB_AVAILABLE)}
-                {status_badge("QuantStats Active", QUANTSTATS_AVAILABLE)}
-                {status_badge("PyPortfolioOpt Active", PYPFOPT_AVAILABLE)}
-                <br><br>
-                <b>RF:</b> {RISK_FREE_RATE:.2%}<br>
-                <b>Data policy:</b> Yahoo-only matched data. No synthetic price fallback.<br>
-                <b>S&P 500 benchmark:</b> ^GSPC, not SPY.
-            </div>
-            """,
-            sizing_mode="stretch_width",
-        ),
-        width=340,
-        height=980,
-        sizing_mode="fixed",
-        styles={
-            "background": "#f8fafc",
-            "padding": "20px",
-            "border-right": "1px solid #dbe4ef",
-            "overflow-y": "auto",
-        },
+        pn.pane.HTML('<div style="font-size:26px;font-weight:900;color:#0f172a;line-height:1.08;">QFA Prime<br>Finance Platform</div><div style="font-size:13px;color:#64748b;margin-top:8px;line-height:1.45;">Render-ready institutional hedge fund dashboard. Yahoo-only data pipeline.</div>'),
+        pn.pane.Markdown('### Investment Universe'), asset_class, region, ticker,
+        pn.pane.Markdown('### Benchmark & Period'), benchmark, start, end,
+        pn.pane.Markdown('### Stress Filters'), family, min_severity,
+        pn.Spacer(height=8), refresh_btn, refresh,
+        html_note('System Status', f'RF: <b>{RF:.2%}</b><br>Max tickers/request: <b>{MAX_TICKERS}</b><br>Ledoit-Wolf: <b>{SKLEARN_AVAILABLE}</b><br>QuantStats: <b>{QUANTSTATS_AVAILABLE}</b><br>TA-Lib: <b>{TALIB_AVAILABLE}</b><br>MC simulations: <b>{MC_SIMULATIONS:,}</b><br>Data policy: <b>Yahoo only; no synthetic fallback.</b>'),
+        width=360, sizing_mode='stretch_height', styles={'background':'#f8fafc','padding':'22px','border-right':'1px solid #dbe4ef','overflow-y':'auto'}
     )
-
-    header = pn.pane.HTML(
-        f"""
-        <div class="qfa-header">
-            <div class="qfa-title">{APP_TITLE}</div>
-            <div class="qfa-subtitle">
-                Hedge-fund-grade analytics: live KPI scorecard, TA-Lib technicals, VaR/CVaR,
-                benchmark-relative tracking error, QuantStats Tearsheet, PyPortfolioOpt construction,
-                universe ranking and stress sensitivity.
-            </div>
-        </div>
-        """,
-        sizing_mode="stretch_width",
-    )
-
-    bound_kpi = pn.bind(build_kpi, ticker, benchmark, start_date, end_date)
-    bound_price = pn.bind(build_price_chart, ticker, start_date, end_date)
-    bound_risk = pn.bind(build_risk_chart, ticker, start_date, end_date)
-    bound_relative = pn.bind(build_benchmark_relative, ticker, benchmark, start_date, end_date)
-    bound_universe = pn.bind(build_universe_board, asset_class, region, start_date, end_date)
-    bound_optimizer = pn.bind(build_optimizer, asset_class, region, start_date, end_date)
-    bound_tearsheet = pn.bind(build_tearsheet, ticker, benchmark, start_date, end_date)
-    bound_stress = pn.bind(build_stress, asset_class, region, start_date, end_date)
-    bound_advanced_risk = pn.bind(build_advanced_risk, ticker, benchmark, start_date, end_date)   # NEW
+    header = pn.pane.HTML(f'<div class="qfa-header"><div class="qfa-title">{APP_TITLE}</div><div class="qfa-subtitle">Reactive portfolio intelligence: KPI scorecard, risk analytics, benchmark-relative tracking error, optimizer, TA-Lib/fallback technicals, advanced VaR/CVaR, VaR/NAV, rolling beta, historical stress testing and tear-sheet generation. Instrument changes recompute all panes through explicit widget dependencies and refresh-token cache invalidation.</div></div>', sizing_mode='stretch_width')
 
     tabs = pn.Tabs(
-        ("Executive KPI Dashboard", bound_kpi),
-        ("Price & TA-Lib", bound_price),
-        ("Risk Metrics", bound_risk),
-        ("Benchmark Relative", bound_relative),
-        ("Advanced Risk Analytics", bound_advanced_risk),          # NEW TAB
-        ("Investment Universe", bound_universe),
-        ("Portfolio Optimizer", bound_optimizer),
-        ("Stress Testing", bound_stress),
-        ("Tearsheet", bound_tearsheet),
-        dynamic=False,
-        sizing_mode="stretch_width",
+        ('Executive Dashboard', pn.bind(executive, ticker, benchmark, start, end, refresh)),
+        ('Technical Dashboard', pn.bind(technical_chart, ticker, start, end, refresh)),
+        ('Risk Analytics', pn.bind(risk_chart, ticker, start, end, refresh)),
+        ('Benchmark Relative', pn.bind(relative_chart, ticker, benchmark, start, end, refresh)),
+        ('Advanced Risk Analytics', pn.bind(advanced_risk, ticker, benchmark, start, end, refresh)),
+        ('Universe Board', pn.bind(universe_board, asset_class, region, start, end, refresh)),
+        ('Optimizer', pn.bind(optimizer, asset_class, region, start, end, refresh)),
+        ('Stress Testing', pn.bind(stress, asset_class, region, start, end, family, min_severity, refresh)),
+        ('Tearsheet', pn.bind(tearsheet, ticker, benchmark, start, end, refresh)),
+        dynamic=True, sizing_mode='stretch_width'
     )
-
-    main = pn.Column(
-        pn.pane.HTML(css(), sizing_mode="stretch_width"),
-        header,
-        tabs,
-        sizing_mode="stretch_width",
-        styles={"padding": "18px", "background": "#ffffff"},
-    )
-
-    return pn.Row(sidebar, main, sizing_mode="stretch_width")
-
+    main = pn.Column(pn.pane.HTML(css(), sizing_mode='stretch_width'), header, tabs, sizing_mode='stretch_width', styles={'padding':'20px','background':'white'})
+    return pn.Row(sidebar, main, sizing_mode='stretch_width')
 
 app = make_app()
 app.servable(title=APP_TITLE)

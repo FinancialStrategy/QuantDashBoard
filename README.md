@@ -1,56 +1,37 @@
-# QFA Hedge Fund Dashboard - Render Ready
+# QFA Prime Finance Platform V4 Render Ready
 
-This is a fully rebuilt reactive Panel dashboard.
+This version integrates the advanced TA-Lib and risk analytics requested from the reference code while preserving the stable V3 Render architecture.
 
-## Key architecture
+## Added in V4
 
-- One source of truth: `pn.widgets`
-- All analytic blocks are connected with `pn.bind`
-- No mixed `param.Parameterized`, `pn.Param`, static KPI panes, or stale state
-- Yahoo-only matched data policy
-- S&P 500 benchmark is `^GSPC`, not SPY
-- RF is fixed at 4.5%
-- QuantStats tab name is `Tearsheet`
-- PyPortfolioOpt optimizer is included
+- Optional TA-Lib indicator engine with formula fallback.
+- RSI, MACD, Bollinger Bands, ATR, Stochastic Oscillator, EWMA risk signal.
+- Advanced Risk Analytics tab.
+- Historical, parametric-normal, and Monte Carlo t-distribution VaR.
+- Historical and Monte Carlo CVaR snapshot cards.
+- Rolling 95% / 99% VaR backtest panel.
+- VaR / 3-month NAV ratio chart.
+- Rolling beta vs selected benchmark.
+- Historical benchmark drawdown regime table.
+- Render-safe Monte Carlo cap via `QFA_MC_SIMULATIONS`.
 
-## Render deployment
+## Render notes
 
-Use the included `render.yaml`.
+TA-Lib is optional. The application does not require TA-Lib to deploy. If TA-Lib is unavailable on Render, the app automatically uses the formula fallback and displays `Formula fallback` in the dashboard.
 
-Start command:
+Recommended environment variables:
 
-```bash
-panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
+```text
+QFA_MAX_TICKERS=12
+QFA_CACHE_TTL_SECONDS=900
+QFA_MC_SIMULATIONS=3000
+QFA_ADVANCED_RISK_WINDOW=252
+QFA_RISK_FREE_RATE=0.045
 ```
 
-## TA-Lib
-
-The app attempts to import TA-Lib. If TA-Lib is available, the technical engine uses TA-Lib.  
-If TA-Lib is not available on Render, the app does not crash; it uses formula-based indicator calculations only.  
-This fallback is only for indicators. Price data remains Yahoo-only and no synthetic/fallback prices are generated.
-
-To try TA-Lib manually, install:
-
-```bash
-pip install -r requirements-talib-optional.txt
-```
-
-## Local run
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-panel serve app.py --show
+panel serve app.py --address 0.0.0.0 --port 10000 --allow-websocket-origin="*"
 ```
-
-## Notes
-
-Render free tier may sleep. First load and QuantStats generation can be slower.
-
-
-## V2 stability changes
-
-- Tabs now use `dynamic=True` to prevent QuantStats and optimizer from rendering at initial page load.
-- Matplotlib font-manager warnings are suppressed.
-- Arial was removed from the Python/Plotly font stack; DejaVu/Liberation Sans are used on Linux.
-- Sidebar sizing was changed to avoid Panel `FIXED_SIZING_MODE` warnings.
-- If Render shows `SIGTERM`, it usually means the service was restarted or memory was exceeded during heavy initial rendering; this V2 build avoids eager rendering.
