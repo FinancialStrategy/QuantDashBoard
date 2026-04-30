@@ -1,30 +1,47 @@
-# QFA Dashboard FinTECH - Render Rebuilt V2
+# QFA Hedge Fund Dashboard - Render Ready
 
-Render-ready Panel application with fully reactive widget architecture.
+This is a fully rebuilt reactive Panel dashboard.
 
-## Key fixes
+## Key architecture
 
-- Uses `pn.widgets.Select` as the single source of state.
-- Uses `pn.bind(...)` for every tab, so Instrument and Benchmark changes trigger recomputation.
-- No synthetic/fallback price data. Yahoo Finance matched OHLCV data only.
-- S&P 500 benchmark uses `^GSPC`, not SPY.
-- Risk-free rate is fixed at 4.5%.
-- QuantStats tab is named **Tearsheet**.
-- PyPortfolioOpt optimizer tab included.
-- TA-Lib is used if installed; otherwise only technical indicator formulas fall back. Price data never falls back.
+- One source of truth: `pn.widgets`
+- All analytic blocks are connected with `pn.bind`
+- No mixed `param.Parameterized`, `pn.Param`, static KPI panes, or stale state
+- Yahoo-only matched data policy
+- S&P 500 benchmark is `^GSPC`, not SPY
+- RF is fixed at 4.5%
+- QuantStats tab name is `Tearsheet`
+- PyPortfolioOpt optimizer is included
 
 ## Render deployment
 
-1. Upload files to GitHub.
-2. Create a new Render Web Service.
-3. Use this repository.
-4. Render will read `render.yaml`.
-5. Start command:
+Use the included `render.yaml`.
+
+Start command:
 
 ```bash
 panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=${RENDER_EXTERNAL_HOSTNAME} --num-procs 1
 ```
 
+## TA-Lib
+
+The app attempts to import TA-Lib. If TA-Lib is available, the technical engine uses TA-Lib.  
+If TA-Lib is not available on Render, the app does not crash; it uses formula-based indicator calculations only.  
+This fallback is only for indicators. Price data remains Yahoo-only and no synthetic/fallback prices are generated.
+
+To try TA-Lib manually, install:
+
+```bash
+pip install -r requirements-talib-optional.txt
+```
+
+## Local run
+
+```bash
+pip install -r requirements.txt
+panel serve app.py --show
+```
+
 ## Notes
 
-QuantStats report generation may take time on first click because it downloads Yahoo data and builds HTML.
+Render free tier may sleep. First load and QuantStats generation can be slower.
